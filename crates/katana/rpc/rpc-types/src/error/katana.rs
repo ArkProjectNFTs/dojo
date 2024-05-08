@@ -11,6 +11,8 @@ pub enum KatanaApiError {
     FailedToDumpState = 2,
     #[error("Failed to update storage.")]
     FailedToUpdateStorage = 3,
+    #[error("Authentication failed.")]
+    AuthenticationFailed = 4,
 }
 
 impl From<KatanaApiError> for Error {

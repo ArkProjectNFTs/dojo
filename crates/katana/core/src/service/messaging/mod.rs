@@ -38,6 +38,7 @@ mod service;
 mod starknet;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use ::starknet::providers::ProviderError as StarknetProviderError;
 use anyhow::Result;
@@ -47,11 +48,13 @@ use ethers::providers::ProviderError as EthereumProviderError;
 use katana_primitives::chain::ChainId;
 use katana_primitives::receipt::MessageToL1;
 use serde::Deserialize;
+use tokio::sync::RwLock as AsyncRwLock;
 use tracing::{error, info};
 
 pub use self::service::{MessagingOutcome, MessagingService};
 #[cfg(feature = "starknet-messaging")]
 use self::starknet::StarknetMessaging;
+use crate::hooker::KatanaHooker;
 
 pub(crate) const LOG_TARGET: &str = "messaging";
 pub(crate) const CONFIG_CHAIN_ETHEREUM: &str = "ethereum";
@@ -72,6 +75,9 @@ pub enum Error {
     SendError,
     #[error(transparent)]
     Provider(ProviderError),
+
+    #[error("Solis: Invalid assets before sending message transaction")]
+    SolisAssetFault,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -169,7 +175,11 @@ pub enum MessengerMode {
 }
 
 impl MessengerMode {
-    pub async fn from_config(config: MessagingConfig) -> MessengerResult<Self> {
+    pub async fn from_config(
+        config: MessagingConfig,
+        #[allow(unused)]
+        hooker: Arc<AsyncRwLock<dyn KatanaHooker + Send + Sync>>,
+    ) -> MessengerResult<Self> {
         match config.chain.as_str() {
             CONFIG_CHAIN_ETHEREUM => match EthereumMessaging::new(config).await {
                 Ok(m_eth) => {
@@ -183,7 +193,7 @@ impl MessengerMode {
             },
 
             #[cfg(feature = "starknet-messaging")]
-            CONFIG_CHAIN_STARKNET => match StarknetMessaging::new(config).await {
+            CONFIG_CHAIN_STARKNET => match StarknetMessaging::new(config, hooker).await {
                 Ok(m_sn) => {
                     info!(target: LOG_TARGET, "Messaging enabled [Starknet]");
                     Ok(MessengerMode::Starknet(m_sn))

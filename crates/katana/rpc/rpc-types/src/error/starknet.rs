@@ -67,6 +67,8 @@ pub enum StarknetApiError {
     TooManyKeysInFilter,
     #[error("Failed to fetch pending transactions")]
     FailedToFetchPendingTransactions,
+    #[error("Solis: Assets are invalid on L2")]
+    SolisAssetFault,
 }
 
 impl StarknetApiError {
@@ -101,6 +103,7 @@ impl StarknetApiError {
             StarknetApiError::UnsupportedContractClassVersion => 62,
             StarknetApiError::UnexpectedError { .. } => 63,
             StarknetApiError::ProofLimitExceeded => 10000,
+            StarknetApiError::SolisAssetFault => 7777,
         }
     }
 }

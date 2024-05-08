@@ -1,11 +1,15 @@
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use katana_core::accounts::Account;
+use katana_core::hooker::HookerAddresses;
 use katana_primitives::FieldElement;
 
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "katana"))]
 #[cfg_attr(feature = "client", rpc(client, server, namespace = "katana"))]
 pub trait KatanaApi {
+    #[method(name = "setSolisAddresses")]
+    async fn set_addresses(&self, addresses: HookerAddresses, basic_auth: String) -> RpcResult<()>;
+
     #[method(name = "generateBlock")]
     async fn generate_block(&self) -> RpcResult<()>;
 

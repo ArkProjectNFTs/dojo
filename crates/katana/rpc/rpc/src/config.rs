@@ -6,6 +6,8 @@ pub struct ServerConfig {
     pub host: String,
     pub max_connections: u32,
     pub apis: Vec<ApiKind>,
+    pub rpc_user: String,
+    pub rpc_password: String,
 }
 
 impl ServerConfig {

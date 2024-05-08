@@ -34,7 +34,7 @@ pub async fn spawn(sequencer: Arc<KatanaSequencer>, config: ServerConfig) -> Res
                 methods.merge(StarknetApi::new(sequencer.clone()).into_rpc())?;
             }
             ApiKind::Katana => {
-                methods.merge(KatanaApi::new(sequencer.clone()).into_rpc())?;
+                methods.merge(KatanaApi::new(sequencer.clone(), config.clone()).into_rpc())?;
             }
         }
     }

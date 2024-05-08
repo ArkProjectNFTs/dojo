@@ -1,3 +1,8 @@
+// SOLIS
+use tokio::sync::RwLock as AsyncRwLock;
+use crate::hooker::KatanaHooker;
+//
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -44,10 +49,11 @@ impl MessagingService {
         config: MessagingConfig,
         pool: Arc<TransactionPool>,
         backend: Arc<Backend>,
+        hooker: Arc<AsyncRwLock<dyn KatanaHooker + Send + Sync>>,
     ) -> anyhow::Result<Self> {
         let gather_from_block = config.from_block;
         let interval = interval_from_seconds(config.interval);
-        let messenger = match MessengerMode::from_config(config).await {
+        let messenger = match MessengerMode::from_config(config, hooker).await {
             Ok(m) => Arc::new(m),
             Err(_) => {
                 panic!(
@@ -77,7 +83,7 @@ impl MessagingService {
     ) -> MessengerResult<(u64, usize)> {
         // 200 avoids any possible rejection from RPC with possibly lot's of messages.
         // TODO: May this be configurable?
-        let max_block = 200;
+        let max_block = 20;
 
         match messenger.as_ref() {
             MessengerMode::Ethereum(inner) => {

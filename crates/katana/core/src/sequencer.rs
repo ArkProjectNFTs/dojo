@@ -1,3 +1,8 @@
+// SOLIS
+use tokio::sync::RwLock as AsyncRwLock;
+use crate::hooker::{HookerAddresses, KatanaHooker};
+//
+
 use std::cmp::Ordering;
 use std::iter::Skip;
 use std::slice::Iter;
@@ -57,12 +62,14 @@ pub struct KatanaSequencer {
     pub pool: Arc<TransactionPool>,
     pub backend: Arc<Backend>,
     pub block_producer: BlockProducer,
+    pub hooker: Arc<AsyncRwLock<dyn KatanaHooker + Send + Sync>>,
 }
 
 impl KatanaSequencer {
     pub async fn new(
         config: SequencerConfig,
         starknet_config: StarknetConfig,
+        hooker: Arc<AsyncRwLock<dyn KatanaHooker + Send + Sync>>,
     ) -> anyhow::Result<Self> {
         let backend = Arc::new(Backend::new(starknet_config).await);
 
@@ -90,7 +97,7 @@ impl KatanaSequencer {
 
         #[cfg(feature = "messaging")]
         let messaging = if let Some(config) = config.messaging.clone() {
-            MessagingService::new(config, Arc::clone(&pool), Arc::clone(&backend)).await.ok()
+            MessagingService::new(config, Arc::clone(&pool), Arc::clone(&backend), hooker.clone()).await.ok()
         } else {
             None
         };
@@ -103,7 +110,11 @@ impl KatanaSequencer {
             messaging,
         });
 
-        Ok(Self { pool, config, backend, block_producer })
+        Ok(Self { pool, config, backend, block_producer, hooker })
+    }
+
+    pub async fn set_addresses(&self, addresses: HookerAddresses) {
+        self.hooker.write().await.set_addresses(addresses);
     }
 
     /// Returns the pending state if the sequencer is running in _interval_ mode. Otherwise `None`.

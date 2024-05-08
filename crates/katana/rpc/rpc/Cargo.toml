@@ -17,6 +17,7 @@ katana-rpc-types-builder = { path = "../rpc-types-builder" }
 katana-tasks = { path = "../../tasks" }
 
 anyhow.workspace = true
+base64 = "0.13.0"
 cairo-lang-starknet = "2.3.1"
 flate2.workspace = true
 futures.workspace = true

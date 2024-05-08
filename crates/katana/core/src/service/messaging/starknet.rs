@@ -1,3 +1,8 @@
+// SOLIS
+use crate::hooker::KatanaHooker;
+use tokio::sync::RwLock as AsyncRwLock;
+//
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,6 +19,7 @@ use starknet::macros::{felt, selector};
 use starknet::providers::jsonrpc::HttpTransport;
 use starknet::providers::{AnyProvider, JsonRpcClient, Provider};
 use starknet::signers::{LocalWallet, SigningKey};
+use tracing::info;
 use tracing::{debug, error, trace, warn};
 use url::Url;
 
@@ -35,10 +41,14 @@ pub struct StarknetMessaging {
     wallet: LocalWallet,
     sender_account_address: FieldElement,
     messaging_contract_address: FieldElement,
+    hooker: Arc<AsyncRwLock<dyn KatanaHooker + Send + Sync>>,
 }
 
 impl StarknetMessaging {
-    pub async fn new(config: MessagingConfig) -> Result<StarknetMessaging> {
+    pub async fn new(
+        config: MessagingConfig,
+        hooker: Arc<AsyncRwLock<dyn KatanaHooker + Send + Sync>>,
+    ) -> Result<StarknetMessaging> {
         let provider = AnyProvider::JsonRpcHttp(JsonRpcClient::new(HttpTransport::new(
             Url::parse(&config.rpc_url)?,
         )));
@@ -57,6 +67,7 @@ impl StarknetMessaging {
             chain_id,
             sender_account_address,
             messaging_contract_address,
+            hooker,
         })
     }
 
@@ -103,7 +114,6 @@ impl StarknetMessaging {
         Ok(block_to_events)
     }
 
-    /// Sends an invoke TX on starknet.
     async fn send_invoke_tx(&self, calls: Vec<Call>) -> Result<FieldElement> {
         let signer = Arc::new(&self.wallet);
 
@@ -115,14 +125,24 @@ impl StarknetMessaging {
             ExecutionEncoding::New,
         );
 
-        account.set_block_id(BlockId::Tag(BlockTag::Latest));
+        account.set_block_id(BlockId::Tag(BlockTag::Pending));
 
         // TODO: we need to have maximum fee configurable.
-        let execution = account.execute(calls).fee_estimate_multiplier(10f64);
-        let estimated_fee = (execution.estimate_fee().await?.overall_fee) * 10;
-        let tx = execution.max_fee(estimated_fee.into()).send().await?;
+        let execution = account.execute(calls);
 
-        Ok(tx.transaction_hash)
+        match execution.send().await {
+            Ok(tx) => {
+                info!("Transaction successful: {:?}", tx);
+                println!("tx: {:?}", tx);
+                println!("tx_hash: {:?}", tx.transaction_hash);
+                Ok(tx.transaction_hash)
+            }
+            Err(e) => {
+                error!("Error sending transaction: {:?}", e);
+                // Depending on your error handling strategy, you might want to return the error or handle it differently
+                Err(e.into()) // Convert the error
+            }
+        }
     }
 
     /// Sends messages hashes to settlement layer by sending a transaction.
@@ -191,25 +211,37 @@ impl Messenger for StarknetMessaging {
 
         let mut l1_handler_txs: Vec<L1HandlerTx> = vec![];
 
-        self.fetch_events(BlockId::Number(from_block), BlockId::Number(to_block))
+        let events = self
+            .fetch_events(BlockId::Number(from_block), BlockId::Number(to_block))
             .await
             .map_err(|_| Error::SendError)
-            .unwrap()
-            .iter()
-            .for_each(|(block_number, block_events)| {
-                debug!(
-                    target: LOG_TARGET,
-                    "Converting events of block {} into L1HandlerTx ({} events)",
-                    block_number,
-                    block_events.len(),
-                );
+            .unwrap();
 
-                block_events.iter().for_each(|e| {
-                    if let Ok(tx) = l1_handler_tx_from_event(e, chain_id) {
-                        l1_handler_txs.push(tx)
+        for (block_number, block_events) in events.iter() {
+            debug!(
+                target: LOG_TARGET,
+                "Converting events of block {} into L1HandlerTx ({} events)",
+                block_number,
+                block_events.len(),
+            );
+
+            for e in block_events.iter() {
+                if let Ok(tx) = l1_handler_tx_from_event(e, chain_id) {
+                    if let Ok((from, to, selector)) = info_from_event(e) {
+                        let is_message_accepted = self
+                            .hooker
+                            .read()
+                            .await
+                            .verify_message_to_appchain(from, to, selector)
+                            .await;
+
+                        if is_message_accepted {
+                            l1_handler_txs.push(tx)
+                        }
                     }
-                })
-            });
+                }
+            }
+        }
 
         Ok((to_block, l1_handler_txs))
     }
@@ -224,17 +256,26 @@ impl Messenger for StarknetMessaging {
 
         let (hashes, calls) = parse_messages(messages)?;
 
-        if !calls.is_empty() {
-            match self.send_invoke_tx(calls).await {
+        for call in &calls {
+            // 1. Verify before TX.
+            if !self.hooker.read().await.verify_tx_for_starknet(call.clone()).await {
+                continue;
+            }
+
+            match self.send_invoke_tx(vec![call.clone()]).await {
                 Ok(tx_hash) => {
                     trace!(target: LOG_TARGET, "Invoke transaction hash {:#064x}", tx_hash);
                 }
                 Err(e) => {
+                    // 2. React on TX error.
+                    self.hooker.read().await.on_starknet_tx_failed(call.clone()).await;
                     error!("Error sending invoke tx on Starknet: {:?}", e);
-                    return Err(Error::SendError);
                 }
             };
         }
+
+        // We don't want to use the multicall in order to not
+        // have all the transaction to fail because of 1.
 
         self.send_hashes(hashes.clone()).await?;
 
@@ -255,6 +296,8 @@ fn parse_messages(messages: &[MessageToL1]) -> MessengerResult<(Vec<FieldElement
         // `to_address` is set to 'EXE'/'MSG' to indicate that the message
         // has to be executed or sent normally.
         let magic = m.to_address;
+
+        // TODO: Whitelist the orderbook contract.
 
         if magic == EXE_MAGIC {
             if m.payload.len() < 2 {
@@ -344,6 +387,27 @@ fn l1_handler_tx_from_event(event: &EmittedEvent, chain_id: ChainId) -> Result<L
         version: FieldElement::ZERO,
         contract_address: to_address.into(),
     })
+}
+
+fn info_from_event(event: &EmittedEvent) -> Result<(FieldElement, FieldElement, FieldElement)> {
+    if event.keys[0] != selector!("MessageSentToAppchain") {
+        debug!(
+            target: LOG_TARGET,
+            "Event with key {:?} can't be converted into L1HandlerTx", event.keys[0],
+        );
+        return Err(Error::GatherError.into());
+    }
+
+    if event.keys.len() != 4 || event.data.len() < 2 {
+        error!(target: LOG_TARGET, "Event MessageSentToAppchain is not well formatted");
+    }
+
+    // See contrat appchain_messaging.cairo for MessageSentToAppchain event.
+    let from_address = event.keys[2];
+    let to_address = event.keys[3];
+    let entry_point_selector = event.data[0];
+
+    Ok((from_address, to_address, entry_point_selector))
 }
 
 #[cfg(test)]
@@ -477,7 +541,7 @@ mod tests {
             contract_address: to_address.into(),
         };
 
-        let tx = l1_handler_tx_from_event(&event, chain_id).unwrap();
+        let (tx, _) = l1_handler_tx_from_event(&event, chain_id).unwrap();
 
         assert_eq!(tx, expected);
     }

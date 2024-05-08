@@ -584,6 +584,22 @@ impl StarknetApiServer for StarknetApi {
         &self,
         invoke_transaction: BroadcastedInvokeTx,
     ) -> RpcResult<InvokeTxResult> {
+        if invoke_transaction.is_query {
+            return Err(StarknetApiError::UnsupportedTransactionVersion.into());
+        }
+
+        if !self
+            .inner
+            .sequencer
+            .hooker
+            .read()
+            .await
+            .verify_invoke_tx_before_pool(invoke_transaction.0.clone())
+            .await
+        {
+            return Err(StarknetApiError::SolisAssetFault.into());
+        }
+
         self.on_io_blocking_task(move |this| {
             if invoke_transaction.is_query {
                 return Err(StarknetApiError::UnsupportedTransactionVersion.into());

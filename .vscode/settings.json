@@ -1,0 +1,5 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "./crates/katana/core/Cargo.toml",
+  ]
+}
