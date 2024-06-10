@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "bin/dojo-language-server",
     "bin/katana",
+    "bin/solis",
     "bin/saya",
     "bin/sozo",
     "bin/torii",

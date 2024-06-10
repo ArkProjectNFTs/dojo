@@ -7,6 +7,8 @@ pub struct ServerConfig {
     pub max_connections: u32,
     pub allowed_origins: Option<Vec<String>>,
     pub apis: Vec<ApiKind>,
+    pub rpc_user: String,
+    pub rpc_password: String,
 }
 
 impl ServerConfig {

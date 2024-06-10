@@ -25,7 +25,7 @@ fn create_test_sequencer_config() -> (SequencerConfig, StarknetConfig) {
 async fn create_test_sequencer() -> KatanaSequencer<NoopExecutorFactory> {
     let executor_factory = NoopExecutorFactory::new();
     let (sequencer_config, starknet_config) = create_test_sequencer_config();
-    KatanaSequencer::new(executor_factory, sequencer_config, starknet_config).await.unwrap()
+    KatanaSequencer::new(executor_factory, sequencer_config, starknet_config, None).await.unwrap()
 }
 
 #[tokio::test]

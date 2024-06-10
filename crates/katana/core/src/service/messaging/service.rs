@@ -1,7 +1,5 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Duration;
+use crate::hooker::KatanaHooker;
+use tokio::sync::RwLock as AsyncRwLock;
 
 use futures::{Future, FutureExt, Stream};
 use katana_executor::ExecutorFactory;
@@ -10,6 +8,10 @@ use katana_primitives::receipt::MessageToL1;
 use katana_primitives::transaction::{ExecutableTxWithHash, L1HandlerTx, TxHash};
 use katana_provider::traits::block::BlockNumberProvider;
 use katana_provider::traits::transaction::ReceiptProvider;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::time::{interval_at, Instant, Interval};
 use tracing::{error, info};
 
@@ -27,7 +29,7 @@ pub struct MessagingService<EF: ExecutorFactory> {
     backend: Arc<Backend<EF>>,
     pool: Arc<TransactionPool>,
     /// The messenger mode the service is running in.
-    messenger: Arc<MessengerMode>,
+    messenger: Arc<MessengerMode<EF>>,
     /// The block number of the settlement chain from which messages will be gathered.
     gather_from_block: u64,
     /// The message gathering future.
@@ -45,15 +47,16 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
         config: MessagingConfig,
         pool: Arc<TransactionPool>,
         backend: Arc<Backend<EF>>,
+        hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
     ) -> anyhow::Result<Self> {
         let gather_from_block = config.from_block;
         let interval = interval_from_seconds(config.interval);
-        let messenger = match MessengerMode::from_config(config).await {
+        let messenger = match MessengerMode::from_config(config, hooker).await {
             Ok(m) => Arc::new(m),
             Err(_) => {
                 panic!(
                     "Messaging could not be initialized.\nVerify that the messaging target node \
-                     (anvil or other katana) is running.\n",
+                     (anvil or other katana) is running.\n"
                 )
             }
         };
@@ -71,12 +74,12 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
     }
 
     async fn gather_messages(
-        messenger: Arc<MessengerMode>,
+        messenger: Arc<MessengerMode<EF>>,
         pool: Arc<TransactionPool>,
         backend: Arc<Backend<EF>>,
         from_block: u64,
     ) -> MessengerResult<(u64, usize)> {
-        // 200 avoids any possible rejection from RPC with possibly lot's of messages.
+        // 200 avoids any possible rejection from RPC with possibly lots of messages.
         // TODO: May this be configurable?
         let max_block = 200;
 
@@ -95,14 +98,14 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                 Ok((block_num, txs_count))
             }
 
-            #[cfg(feature = "starknet-messaging")]
             MessengerMode::Starknet(inner) => {
                 let (block_num, txs) =
                     inner.gather_messages(from_block, max_block, backend.chain_id).await?;
                 let txs_count = txs.len();
-
+                info!(target: LOG_TARGET, "Gathered {} transactions for Starknet mode.", txs_count);
                 txs.into_iter().for_each(|tx| {
                     let hash = tx.calculate_hash();
+                    info!(target: LOG_TARGET, "Processing transaction with hash: {:#x}", hash);
                     trace_l1_handler_tx_exec(hash, &tx);
                     pool.add_transaction(ExecutableTxWithHash { hash, transaction: tx.into() })
                 });
@@ -115,8 +118,9 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
     async fn send_messages(
         block_num: u64,
         backend: Arc<Backend<EF>>,
-        messenger: Arc<MessengerMode>,
+        messenger: Arc<MessengerMode<EF>>,
     ) -> MessengerResult<Option<(u64, usize)>> {
+        // Retrieve messages to be sent from the local blockchain for the given block number
         let Some(messages) = ReceiptProvider::receipts_by_block(
             backend.blockchain.provider(),
             BlockHashOrNumber::Num(block_num),
@@ -127,24 +131,43 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
         };
 
         if messages.is_empty() {
-            Ok(Some((block_num, 0)))
-        } else {
-            match messenger.as_ref() {
-                MessengerMode::Ethereum(inner) => {
-                    let hashes = inner.send_messages(&messages).await.map(|hashes| {
-                        hashes.iter().map(|h| format!("{h:#x}")).collect::<Vec<_>>()
-                    })?;
-                    trace_msg_to_l1_sent(&messages, &hashes);
-                    Ok(Some((block_num, hashes.len())))
-                }
+            info!(target: LOG_TARGET, "No messages to send from block {}", block_num);
+            return Ok(Some((block_num, 0)));
+        }
 
-                #[cfg(feature = "starknet-messaging")]
-                MessengerMode::Starknet(inner) => {
-                    let hashes = inner.send_messages(&messages).await.map(|hashes| {
-                        hashes.iter().map(|h| format!("{h:#x}")).collect::<Vec<_>>()
-                    })?;
-                    trace_msg_to_l1_sent(&messages, &hashes);
-                    Ok(Some((block_num, hashes.len())))
+        info!(target: LOG_TARGET, "Retrieved {} messages from block {}", messages.len(), block_num);
+
+        match messenger.as_ref() {
+            MessengerMode::Ethereum(inner) => {
+                match inner.send_messages(&messages).await {
+                    Ok(hashes) => {
+                        let hash_strings: Vec<String> =
+                            hashes.iter().map(|h| format!("{:#x}", h)).collect();
+                        trace_msg_to_l1_sent(&messages, &hash_strings);
+                        info!(target: LOG_TARGET, "Successfully sent {} messages from block {}", hash_strings.len(), block_num);
+                        Ok(Some((block_num, hash_strings.len())))
+                    }
+                    Err(e) => {
+                        error!(target: LOG_TARGET, error = %e, "Error sending messages from block {}", block_num);
+                        // Even if there's an error, we should move to the next block to avoid infinite retries
+                        Ok(Some((block_num, 0))) // Marking as processed to avoid retries
+                    }
+                }
+            }
+            MessengerMode::Starknet(inner) => {
+                match inner.send_messages(&messages).await {
+                    Ok(hashes) => {
+                        let hash_strings: Vec<String> =
+                            hashes.iter().map(|h| format!("{:#x}", h)).collect();
+                        trace_msg_to_l1_sent(&messages, &hash_strings);
+                        info!(target: LOG_TARGET, "Successfully sent {} messages from block {}", hash_strings.len(), block_num);
+                        Ok(Some((block_num, hash_strings.len())))
+                    }
+                    Err(e) => {
+                        error!(target: LOG_TARGET, error = %e, "Error sending messages from block {}", block_num);
+                        // Even if there's an error, we should move to the next block to avoid infinite retries
+                        Ok(Some((block_num, 0))) // Marking as processed to avoid retries
+                    }
                 }
             }
         }
@@ -190,15 +213,16 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
                         pin.send_from_block,
                         pin.backend.clone(),
                         pin.messenger.clone(),
-                    )))
+                    )));
                 }
             }
         }
 
-        // Poll the gathering future.
+        // Poll the gathering future
         if let Some(mut gather_fut) = pin.msg_gather_fut.take() {
             match gather_fut.poll_unpin(cx) {
                 Poll::Ready(Ok((last_block, msg_count))) => {
+                    info!(target: LOG_TARGET, "Gathered {} transactions up to block {}", msg_count, last_block);
                     pin.gather_from_block = last_block + 1;
                     return Poll::Ready(Some(MessagingOutcome::Gather {
                         lastest_block: last_block,
@@ -206,34 +230,25 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
                     }));
                 }
                 Poll::Ready(Err(e)) => {
-                    error!(
-                        target: LOG_TARGET,
-                        block = %pin.gather_from_block,
-                        error = %e,
-                        "Gathering messages for block."
-                    );
+                    error!(target: LOG_TARGET, block = %pin.gather_from_block, error = %e, "Error gathering messages for block.");
                     return Poll::Pending;
                 }
                 Poll::Pending => pin.msg_gather_fut = Some(gather_fut),
             }
         }
 
-        // Poll the message sending future.
+        // Poll the message sending future
         if let Some(mut send_fut) = pin.msg_send_fut.take() {
             match send_fut.poll_unpin(cx) {
                 Poll::Ready(Ok(Some((block_num, msg_count)))) => {
-                    // +1 to move to the next local block to check messages to be
-                    // sent on the settlement chain.
-                    pin.send_from_block += 1;
+                    info!(target: LOG_TARGET, "Sent {} messages from block {}", msg_count, block_num);
+                    pin.send_from_block = block_num + 1;
                     return Poll::Ready(Some(MessagingOutcome::Send { block_num, msg_count }));
                 }
                 Poll::Ready(Err(e)) => {
-                    error!(
-                        target: LOG_TARGET,
-                        block = %pin.send_from_block,
-                        error = %e,
-                        "Settling messages for block."
-                    );
+                    error!(target: LOG_TARGET, block = %pin.send_from_block, error = %e, "Error sending messages for block.");
+                    // Even if there's an error, we should move to the next block to avoid infinite retries
+                    pin.send_from_block += 1;
                     return Poll::Pending;
                 }
                 Poll::Ready(_) => return Poll::Pending,
@@ -256,7 +271,6 @@ fn interval_from_seconds(secs: u64) -> Interval {
 fn trace_msg_to_l1_sent(messages: &[MessageToL1], hashes: &[String]) {
     assert_eq!(messages.len(), hashes.len());
 
-    #[cfg(feature = "starknet-messaging")]
     let hash_exec_str = format!("{:#064x}", super::starknet::HASH_EXEC);
 
     for (i, m) in messages.iter().enumerate() {
@@ -264,7 +278,6 @@ fn trace_msg_to_l1_sent(messages: &[MessageToL1], hashes: &[String]) {
 
         let hash = &hashes[i];
 
-        #[cfg(feature = "starknet-messaging")]
         if hash == &hash_exec_str {
             let to_address = &payload_str[0];
             let selector = &payload_str[1];
