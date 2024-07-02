@@ -10,6 +10,7 @@
 //!   documentation for usage details. This is **not recommended on Windows**. See [here](https://rust-lang.github.io/rfcs/1974-global-allocators.html#jemalloc)
 //!   for more info.
 
+use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 

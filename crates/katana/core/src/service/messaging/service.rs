@@ -1,4 +1,6 @@
+use crate::service::messaging::{utils::update_l2, starknet::StarknetMessaging};
 use crate::hooker::KatanaHooker;
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock as AsyncRwLock;
 
 use futures::{Future, FutureExt, Stream};
@@ -61,13 +63,34 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
             }
         };
 
+        let latest_block = match &*messenger {
+            MessengerMode::Starknet(StarknetMessaging {
+                wallet : _,
+                provider : _,
+                chain_id : _,
+                sender_account_address : _,
+                messaging_contract_address : _,
+                hooker : _,
+                event_cache : _,
+                latest_block,
+            }) => {
+                // Access and use the fields as needed
+                latest_block.load(Ordering::SeqCst)
+            }
+            _ => {
+                0
+            }
+        };
+
+
         Ok(Self {
             pool,
             backend,
             interval,
             messenger,
             gather_from_block,
-            send_from_block: 0,
+            //send_from_block: 0, //ici?
+            send_from_block: latest_block,
             msg_gather_fut: None,
             msg_send_fut: None,
         })
@@ -103,13 +126,15 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                     inner.gather_messages(from_block, max_block, backend.chain_id).await?;
                 let txs_count = txs.len();
                 info!(target: LOG_TARGET, "Gathered {} transactions for Starknet mode.", txs_count);
-                txs.into_iter().for_each(|tx| {
+                txs.into_iter().for_each(|tx: L1HandlerTx| {
                     let hash = tx.calculate_hash();
                     info!(target: LOG_TARGET, "Processing transaction with hash: {:#x}", hash);
                     trace_l1_handler_tx_exec(hash, &tx);
-                    pool.add_transaction(ExecutableTxWithHash { hash, transaction: tx.into() })
+                    pool.add_transaction(ExecutableTxWithHash { hash, transaction: tx.clone().into() });
+                    //ici, enregistrer msg hash et block number 
+                    //tx.msg_hash et block_num permet de recup ce qu'on veut 
+                    update_l2(block_num, tx.message_hash);
                 });
-
                 Ok((block_num, txs_count))
             }
         }

@@ -39,6 +39,9 @@ use tokio::sync::RwLock as AsyncRwLock;
 mod ethereum;
 mod service;
 mod starknet;
+mod utils;
+use alloy_primitives::B256;
+
 
 use std::path::Path;
 
@@ -108,6 +111,13 @@ pub struct MessagingConfig {
     pub interval: u64,
     /// The block on settlement chain from where Katana will start fetching messages.
     pub from_block: u64,
+
+    pub tx_hash : B256, //ou bytes?
+
+    pub msg_hash : B256 //ou bytes?
+
+    //commencer avec quoi comme default tx_hash/msg_hash? rien? 
+    //ici
 }
 
 impl MessagingConfig {

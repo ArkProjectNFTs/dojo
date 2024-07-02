@@ -1,3 +1,6 @@
+use crate::service::messaging::utils::update_l3;
+use starknet_api::hash::{poseidon_hash_array, StarkFelt};
+
 use crate::hooker::KatanaHooker;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,14 +30,14 @@ const EXE_MAGIC: FieldElement = felt!("0x455845");
 pub const HASH_EXEC: FieldElement = felt!("0xee");
 
 pub struct StarknetMessaging<EF: katana_executor::ExecutorFactory + Send + Sync> {
-    chain_id: FieldElement,
-    provider: AnyProvider,
-    wallet: LocalWallet,
-    sender_account_address: FieldElement,
-    messaging_contract_address: FieldElement,
-    hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
-    event_cache: Arc<AsyncRwLock<HashSet<String>>>,
-    latest_block: Arc<AtomicU64>,
+    pub chain_id: FieldElement,
+    pub provider: AnyProvider,
+    pub wallet: LocalWallet,
+    pub sender_account_address: FieldElement,
+    pub messaging_contract_address: FieldElement,
+    pub hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
+    pub event_cache: Arc<AsyncRwLock<HashSet<String>>>,
+    pub latest_block: Arc<AtomicU64>,
 }
 
 impl<EF: katana_executor::ExecutorFactory + Send + Sync> StarknetMessaging<EF> {
@@ -49,7 +52,8 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> StarknetMessaging<EF> {
         let private_key = FieldElement::from_hex_be(&config.private_key)?;
         let key = SigningKey::from_secret_scalar(private_key);
         let wallet = LocalWallet::from_signing_key(key);
-        let latest_block = Arc::new(AtomicU64::new(0));
+        //let latest_block = Arc::new(AtomicU64::new(0));//ici aussi
+        let latest_block = Arc::new(AtomicU64::new(config.from_block));
 
         let chain_id = provider.chain_id().await?;
         let sender_account_address = FieldElement::from_hex_be(&config.sender_address)?;
@@ -225,8 +229,8 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> Messenger for StarknetM
 
     async fn gather_messages(
         &self,
-        from_block: u64,
-        max_blocks: u64,
+        _from_block: u64,
+        _max_blocks: u64,
         chain_id: ChainId,
     ) -> MessengerResult<(u64, Vec<L1HandlerTx>)> {
         debug!(target: LOG_TARGET, "Gathering messages");
@@ -285,6 +289,13 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> Messenger for StarknetM
                 }
                 return Err(Error::SendError);
             }
+            //ici c'est bon pour update. From block (celui du L3), tx hash? pour l'instant meme si il peut y avoir 2 pareils
+            //poseidon(payload) identifie le message dans un block
+            
+            let last_payload_fe = &messages.last().expect("last message is empty").payload;
+            let last_payload_sf: Vec<StarkFelt> = (last_payload_fe.clone()).into_iter().map(StarkFelt::from).collect();
+            let last_payload_hash = poseidon_hash_array(&last_payload_sf);
+            update_l3(self.latest_block.load(Ordering::SeqCst), last_payload_hash);
             info!(target: LOG_TARGET, "Successfully sent invoke transaction.");
         }
 
