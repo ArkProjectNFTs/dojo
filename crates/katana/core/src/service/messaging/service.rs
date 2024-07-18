@@ -1,4 +1,6 @@
-use crate::service::messaging::{utils::update_l2, starknet::StarknetMessaging};
+use crate::service::messaging::{utils::{update_l3, update_l2_hash, update_l2_block}, starknet::StarknetMessaging};
+use alloy_primitives::B256;
+
 use crate::hooker::KatanaHooker;
 use std::sync::atomic::Ordering;
 use tokio::sync::RwLock as AsyncRwLock;
@@ -40,6 +42,10 @@ pub struct MessagingService<EF: ExecutorFactory> {
     send_from_block: u64,
     /// The message sending future.
     msg_send_fut: Option<MessageSettlingFuture>,
+
+    tx_hash: B256,
+
+    path : String,
 }
 
 impl<EF: ExecutorFactory> MessagingService<EF> {
@@ -51,8 +57,11 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
         backend: Arc<Backend<EF>>,
         hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
     ) -> anyhow::Result<Self> {
-        let gather_from_block = config.from_block;
+        let gather_from_block: u64 = config.gather_from_block;
+        let send_from_block: u64 = config.send_from_block;
+        let tx_hash: B256 = config.tx_hash;
         let interval = interval_from_seconds(config.interval);
+        let path = config.clone().path;
         let messenger = match MessengerMode::from_config(config, hooker).await {
             Ok(m) => Arc::new(m),
             Err(_) => {
@@ -63,7 +72,7 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
             }
         };
 
-        let latest_block = match &*messenger {
+        let _latest_block = match &*messenger {
             MessengerMode::Starknet(StarknetMessaging {
                 wallet : _,
                 provider : _,
@@ -73,9 +82,11 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                 hooker : _,
                 event_cache : _,
                 latest_block,
+                path : _, 
+                tx_hash: _,
             }) => {
                 // Access and use the fields as needed
-                latest_block.load(Ordering::SeqCst)
+                latest_block.load(Ordering::SeqCst)  //à quoi ça sert??
             }
             _ => {
                 0
@@ -90,9 +101,11 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
             messenger,
             gather_from_block,
             //send_from_block: 0, //ici?
-            send_from_block: latest_block,
+            send_from_block,
             msg_gather_fut: None,
             msg_send_fut: None,
+            tx_hash,
+            path: path
         })
     }
 
@@ -100,7 +113,9 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
         messenger: Arc<MessengerMode<EF>>,
         pool: Arc<TransactionPool>,
         backend: Arc<Backend<EF>>,
-        from_block: u64,
+        gather_from_block: u64,
+        tx_hash: B256,
+        path: String,
     ) -> MessengerResult<(u64, usize)> {
         // 200 avoids any possible rejection from RPC with possibly lots of messages.
         // TODO: May this be configurable?
@@ -109,7 +124,7 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
         match messenger.as_ref() {
             MessengerMode::Ethereum(inner) => {
                 let (block_num, txs) =
-                    inner.gather_messages(from_block, max_block, backend.chain_id).await?;
+                    inner.gather_messages(gather_from_block, max_block, backend.chain_id).await?;
                 let txs_count = txs.len();
 
                 txs.into_iter().for_each(|tx| {
@@ -123,18 +138,26 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
 
             MessengerMode::Starknet(inner) => {
                 let (block_num, txs) =
-                    inner.gather_messages(from_block, max_block, backend.chain_id).await?;
+                    inner.gather_messages(gather_from_block, max_block, backend.chain_id).await?;
                 let txs_count = txs.len();
                 info!(target: LOG_TARGET, "Gathered {} transactions for Starknet mode.", txs_count);
+                let mut count = 0;
                 txs.into_iter().for_each(|tx: L1HandlerTx| {
                     let hash = tx.calculate_hash();
                     info!(target: LOG_TARGET, "Processing transaction with hash: {:#x}", hash);
                     trace_l1_handler_tx_exec(hash, &tx);
-                    pool.add_transaction(ExecutableTxWithHash { hash, transaction: tx.clone().into() });
+                    if count == 1 {
+                        pool.add_transaction(ExecutableTxWithHash { hash, transaction: tx.clone().into() }); // ici condition, on skip et on ajoute le prochain
+                    }
                     //ici, enregistrer msg hash et block number 
                     //tx.msg_hash et block_num permet de recup ce qu'on veut 
-                    update_l2(block_num, tx.message_hash);
+                    if tx.message_hash == tx_hash {
+                        count = 1
+                    }
+                    update_l2_hash( tx.message_hash, path.clone()); //ça peut fail mais on a pas mieux . ne pas update le block ici, update que le hash
                 });
+                //update le block ici !, latest
+                update_l2_block(block_num, path.clone());
                 Ok((block_num, txs_count))
             }
         }
@@ -162,6 +185,8 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
 
         info!(target: LOG_TARGET, "Retrieved {} messages from block {}", messages.len(), block_num);
 
+        //let block_num = ... on update ici le block number, et à l'interieur le hash (finalement pas besoin d'update le hash)
+        //let (block_number, length)
         match messenger.as_ref() {
             MessengerMode::Ethereum(inner) => {
                 match inner.send_messages(&messages).await {
@@ -186,6 +211,7 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                             hashes.iter().map(|h| format!("{:#x}", h)).collect();
                         trace_msg_to_l1_sent(&messages, &hash_strings);
                         info!(target: LOG_TARGET, "Successfully sent {} messages from block {}", hash_strings.len(), block_num);
+                        update_l3(block_num, inner.path.clone());   //update here all the block
                         Ok(Some((block_num, hash_strings.len())))
                     }
                     Err(e) => {
@@ -194,6 +220,7 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                         Ok(Some((block_num, 0))) // Marking as processed to avoid retries
                     }
                 }
+               
             }
         }
     }
@@ -217,8 +244,9 @@ pub enum MessagingOutcome {
 impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
     type Item = MessagingOutcome;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let pin = self.get_mut();
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let pin = self.as_mut().get_mut();
+        let path: String = pin.path.clone(); // Clone the path before mutable borrow
 
         if pin.interval.poll_tick(cx).is_ready() {
             if pin.msg_gather_fut.is_none() {
@@ -227,6 +255,8 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
                     pin.pool.clone(),
                     pin.backend.clone(),
                     pin.gather_from_block,
+                    pin.tx_hash,
+                    path,
                 )));
             }
 

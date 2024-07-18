@@ -1,7 +1,10 @@
-use crate::service::messaging::utils::update_l3;
-use starknet_api::hash::{poseidon_hash_array, StarkFelt};
+/*use crate::service::messaging::utils::update_l3;
+use starknet_api::hash::{poseidon_hash_array, StarkFelt};*/
 
 use crate::hooker::KatanaHooker;
+use alloy_primitives::Bytes;
+use alloy_primitives::B256;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use katana_primitives::chain::ChainId;
@@ -38,6 +41,8 @@ pub struct StarknetMessaging<EF: katana_executor::ExecutorFactory + Send + Sync>
     pub hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
     pub event_cache: Arc<AsyncRwLock<HashSet<String>>>,
     pub latest_block: Arc<AtomicU64>,
+    pub path : String, //Todo : remove this and better manage the config, to avoid multiple calls to the config during update.
+    pub tx_hash : B256,
 }
 
 impl<EF: katana_executor::ExecutorFactory + Send + Sync> StarknetMessaging<EF> {
@@ -53,7 +58,7 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> StarknetMessaging<EF> {
         let key = SigningKey::from_secret_scalar(private_key);
         let wallet = LocalWallet::from_signing_key(key);
         //let latest_block = Arc::new(AtomicU64::new(0));//ici aussi
-        let latest_block = Arc::new(AtomicU64::new(config.from_block));
+        let latest_block = Arc::new(AtomicU64::new(config.send_from_block)); //where do i get latest block, where is it used?
 
         let chain_id = provider.chain_id().await?;
         let sender_account_address = FieldElement::from_hex_be(&config.sender_address)?;
@@ -70,6 +75,8 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> StarknetMessaging<EF> {
             hooker,
             event_cache: Arc::new(AsyncRwLock::new(HashSet::new())),
             latest_block,
+            path : config.path,
+            tx_hash : config.tx_hash,
         })
     }
 
@@ -289,13 +296,14 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> Messenger for StarknetM
                 }
                 return Err(Error::SendError);
             }
-            //ici c'est bon pour update. From block (celui du L3), tx hash? pour l'instant meme si il peut y avoir 2 pareils
+            /*//ici c'est bon pour update. From block (celui du L3), tx hash? pour l'instant meme si il peut y avoir 2 pareils
             //poseidon(payload) identifie le message dans un block
             
             let last_payload_fe = &messages.last().expect("last message is empty").payload;
             let last_payload_sf: Vec<StarkFelt> = (last_payload_fe.clone()).into_iter().map(StarkFelt::from).collect();
             let last_payload_hash = poseidon_hash_array(&last_payload_sf);
-            update_l3(self.latest_block.load(Ordering::SeqCst), last_payload_hash);
+            update_l3(self.latest_block.load(Ordering::SeqCst), last_payload_hash, self.path.clone()); //latest block pas bon. Block du message*/
+            //finalement pas besoin d'updater le hash (car toutes les transactions se font en meme temps, multicall), et le block number s'update ailleur.
             info!(target: LOG_TARGET, "Successfully sent invoke transaction.");
         }
 

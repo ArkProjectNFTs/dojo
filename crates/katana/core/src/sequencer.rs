@@ -85,7 +85,7 @@ impl<EF: ExecutorFactory> KatanaSequencer<EF> {
         #[cfg(feature = "messaging")]
         let messaging = if let Some(config) = config.messaging.clone() {
             match &hooker {
-                Some(hooker_ref) => MessagingService::new(
+                Some(hooker_ref) => MessagingService::new(//ici !!
                     config,
                     Arc::clone(&pool),
                     Arc::clone(&backend),
@@ -109,7 +109,7 @@ impl<EF: ExecutorFactory> KatanaSequencer<EF> {
             miner,
             block_producer.clone(),
             #[cfg(feature = "messaging")]
-            messaging,
+            messaging, //ici !!
         ));
 
         Ok(Self { pool, config, backend, block_producer, hooker })

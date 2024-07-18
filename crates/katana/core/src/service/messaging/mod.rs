@@ -110,11 +110,15 @@ pub struct MessagingConfig {
     /// from/to the settlement chain.
     pub interval: u64,
     /// The block on settlement chain from where Katana will start fetching messages.
-    pub from_block: u64,
+    pub gather_from_block: u64,
 
-    pub tx_hash : B256, //ou bytes?
+    pub send_from_block: u64,
 
-    pub msg_hash : B256 //ou bytes?
+    pub path : String,
+
+    pub tx_hash : B256, 
+
+    //pub msg_hash : B256 
 
     //commencer avec quoi comme default tx_hash/msg_hash? rien? 
     //ici
@@ -123,9 +127,16 @@ pub struct MessagingConfig {
 impl MessagingConfig {
     /// Load the config from a JSON file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let buf = std::fs::read(path)?;
-        serde_json::from_slice(&buf).map_err(|e| e.into())
+        /*let buf = std::fs::read(path)?;
+        serde_json::from_slice(&buf).map_err(|e| e.into())*/
+        let path_ref = path.as_ref();
+        let buf = std::fs::read(path_ref)?;
+        let mut config: MessagingConfig = serde_json::from_slice(&buf)?;
+        config.path = path_ref.to_string_lossy().into_owned();
+        Ok(config)
     }
+
+    //ici?
 
     /// This is used as the clap `value_parser` implementation
     pub fn parse(path: &str) -> Result<Self, String> {
@@ -195,7 +206,7 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> MessengerMode<EF> {
                 }
             },
 
-            CONFIG_CHAIN_STARKNET => match StarknetMessaging::new(config, hooker).await {
+            CONFIG_CHAIN_STARKNET => match StarknetMessaging::new(config, hooker).await { //ici !!
                 Ok(m_sn) => {
                     info!(target: LOG_TARGET, "Messaging enabled [Starknet].");
                     Ok(MessengerMode::Starknet(m_sn))
