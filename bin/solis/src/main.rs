@@ -43,6 +43,8 @@ pub(crate) const LOG_TARGET: &str = "katana::cli";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv().ok();
+
     let args = KatanaArgs::parse();
     args.init_logging()?;
 

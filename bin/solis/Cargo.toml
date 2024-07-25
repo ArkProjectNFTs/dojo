@@ -19,6 +19,7 @@ clap_complete.workspace = true
 common.workspace = true
 console.workspace = true
 dojo-metrics.workspace = true
+dotenv = "0.15.0"
 katana-core.workspace = true
 katana-executor.workspace = true
 katana-primitives.workspace = true
