@@ -159,13 +159,13 @@ pub trait Messenger {
     ///
     /// # Arguments
     ///
-    /// * `from_block` - From which block the messages should be gathered.
+    /// * `gather_from_block` - From which block the messages should be gathered.
     /// * `max_block` - The number of block fetched in the event/log filter. A too big value can
     ///   cause the RPC node to reject the query.
     /// * `chain_id` - The sequencer chain id for transaction hash computation.
     async fn gather_messages(
         &self,
-        from_block: u64,
+        gather_from_block: u64,
         max_blocks: u64,
         chain_id: ChainId,
     ) -> MessengerResult<(u64, Vec<Self::MessageTransaction>)>;

@@ -146,7 +146,18 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                     let hash = tx.calculate_hash();
                     info!(target: LOG_TARGET, "Processing transaction with hash: {:#x}", hash);
                     trace_l1_handler_tx_exec(hash, &tx);
-                    if count == 1 {
+
+
+                    //This is for the first time, we read 00...00 from the config but it's okay.
+                    let mut buffer = [0u8; 32];  // Initialize a buffer with 32 zero bytes
+                    let bytes = "0000000000000000000000000000000000000000000000000000000000000000".as_bytes(); // Convert the string to a byte slice
+                    // Copy the bytes to the buffer, up to 32 bytes
+                    let len = std::cmp::min(bytes.len(), 32);
+                    buffer[..len].copy_from_slice(&bytes[..len]);
+
+
+
+                    if count == 1 || tx_hash == buffer {
                         pool.add_transaction(ExecutableTxWithHash { hash, transaction: tx.clone().into() }); // ici condition, on skip et on ajoute le prochain
                     }
                     //ici, enregistrer msg hash et block number 

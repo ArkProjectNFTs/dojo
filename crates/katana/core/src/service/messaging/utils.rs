@@ -25,7 +25,7 @@ pub fn update_l2_block(new_block_num: u64, path : String) {
 
     // Update the 'from_block' field with the new block number.
     if let Some(obj) = data.as_object_mut() {
-    obj.insert("from_block".to_string(), serde_json::json!(new_block_num));
+    obj.insert("gather_from_block".to_string(), serde_json::json!(new_block_num));
     //obj.insert("tx_hash".to_string(), serde_json::json!(tx_hash));
     }
 
@@ -88,7 +88,7 @@ pub fn update_l3(new_block_num: u64, /*msg_hash : PoseidonHash,*/ path : String)
 
     // Update the 'from_block' field with the new block number.
     if let Some(obj) = data.as_object_mut() {
-    obj.insert("from_block".to_string(), serde_json::json!(new_block_num));
+    obj.insert("send_from_block".to_string(), serde_json::json!(new_block_num));
     //obj.insert("msg_hash".to_string(), serde_json::json!(msg_hash));
     }
 
