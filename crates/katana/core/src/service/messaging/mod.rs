@@ -41,6 +41,8 @@ mod service;
 mod starknet;
 
 use std::path::Path;
+use std::fs::File;
+use std::io::Write;
 
 use ::starknet::providers::ProviderError as StarknetProviderError;
 use alloy_transport::TransportError;
@@ -49,7 +51,7 @@ use async_trait::async_trait;
 use ethereum::EthereumMessaging;
 use katana_primitives::chain::ChainId;
 use katana_primitives::receipt::MessageToL1;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 pub use self::service::{MessagingOutcome, MessagingService};
@@ -90,7 +92,7 @@ impl From<TransportError> for Error {
 }
 
 /// The config used to initialize the messaging service.
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone, Serialize)]
 pub struct MessagingConfig {
     /// The settlement chain.
     pub chain: String,
@@ -107,7 +109,11 @@ pub struct MessagingConfig {
     /// from/to the settlement chain.
     pub interval: u64,
     /// The block on settlement chain from where Katana will start fetching messages.
-    pub from_block: u64,
+    pub gather_from_block: u64,
+    /// The block from where sequencer wil start sending messages.
+    pub send_from_block: u64,
+    /// Path to the config file.
+    pub config_file: String,
 }
 
 impl MessagingConfig {
@@ -119,7 +125,24 @@ impl MessagingConfig {
 
     /// This is used as the clap `value_parser` implementation
     pub fn parse(path: &str) -> Result<Self, String> {
-        Self::load(path).map_err(|e| e.to_string())
+        let mut config = Self::load(path).map_err(|e| e.to_string())?;
+        config.config_file = path.to_string();
+        config.save().map_err(|e| e.to_string())?;
+        Ok(config)
+    }
+
+    /// Save the config to a JSON file.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        if self.config_file.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Config file path is empty",
+            ));
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        let mut file = File::create(&self.config_file)?;
+        file.write_all(json.as_bytes())?;
+        Ok(())
     }
 }
 

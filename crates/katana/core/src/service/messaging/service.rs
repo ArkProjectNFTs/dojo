@@ -9,7 +9,7 @@ use katana_primitives::transaction::{ExecutableTxWithHash, L1HandlerTx, TxHash};
 use katana_provider::traits::block::BlockNumberProvider;
 use katana_provider::traits::transaction::ReceiptProvider;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::time::{interval_at, Instant, Interval};
@@ -38,6 +38,8 @@ pub struct MessagingService<EF: ExecutorFactory> {
     send_from_block: u64,
     /// The message sending future.
     msg_send_fut: Option<MessageSettlingFuture>,
+    /// The messaging configuration.
+    messaging_config: Arc<RwLock<MessagingConfig>>,
 }
 
 impl<EF: ExecutorFactory> MessagingService<EF> {
@@ -49,9 +51,10 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
         backend: Arc<Backend<EF>>,
         hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
     ) -> anyhow::Result<Self> {
-        let gather_from_block = config.from_block;
+        let gather_from_block = config.gather_from_block;
+        let send_from_block = config.send_from_block;
         let interval = interval_from_seconds(config.interval);
-        let messenger = match MessengerMode::from_config(config, hooker).await {
+        let messenger = match MessengerMode::from_config(config.clone(), hooker).await {
             Ok(m) => Arc::new(m),
             Err(_) => {
                 panic!(
@@ -67,9 +70,10 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
             interval,
             messenger,
             gather_from_block,
-            send_from_block: 60,
+            send_from_block,
             msg_gather_fut: None,
             msg_send_fut: None,
+            messaging_config: Arc::new(RwLock::new(config)),
         })
     }
 
@@ -196,9 +200,6 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
         let pin = self.get_mut();
 
         if pin.interval.poll_tick(cx).is_ready() {
-            println!("MessagingService::poll_next");
-            println!("pin.msg_gather_fut.is_none() = {:?}", pin.msg_gather_fut.is_none());
-            println!("pin.msg_send_fut.gather_from_block() = {:?}", pin.gather_from_block);
             if pin.msg_gather_fut.is_none() {
                 pin.msg_gather_fut = Some(Box::pin(Self::gather_messages(
                     pin.messenger.clone(),
@@ -225,7 +226,7 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
         if let Some(mut gather_fut) = pin.msg_gather_fut.take() {
             match gather_fut.poll_unpin(cx) {
                 Poll::Ready(Ok((last_block, msg_count))) => {
-                    info!(target: LOG_TARGET, "Gathered {} transactions up to block yb {}", msg_count, last_block);
+                    info!(target: LOG_TARGET, "Gathered {} transactions up to block {}", msg_count, last_block);
                     pin.gather_from_block = last_block + 1;
                     return Poll::Ready(Some(MessagingOutcome::Gather {
                         lastest_block: last_block,
@@ -246,6 +247,10 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
                 Poll::Ready(Ok(Some((block_num, msg_count)))) => {
                     info!(target: LOG_TARGET, "Sent {} messages from block {}", msg_count, block_num);
                     pin.send_from_block = block_num + 1;
+                    // update the config with the latest block number sent.
+                    let mut messaging_config = pin.messaging_config.write().unwrap();
+                    messaging_config.send_from_block = pin.send_from_block;
+                    let _ = messaging_config.save();
                     return Poll::Ready(Some(MessagingOutcome::Send { block_num, msg_count }));
                 }
                 Poll::Ready(Err(e)) => {
