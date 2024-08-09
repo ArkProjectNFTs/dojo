@@ -1,13 +1,15 @@
 //! This module contains a hooker trait, that is added to katana in order to
 //! allow external code to react at some precise moment of katana processing.
 
-use crate::sequencer::KatanaSequencer;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use katana_executor::ExecutorFactory;
 use starknet::accounts::Call;
 use starknet::core::types::{BroadcastedInvokeTransaction, FieldElement};
-use std::sync::Arc;
 use tracing::{error, info};
+
+use crate::sequencer::KatanaSequencer;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Copy, PartialEq, Eq)]
 pub struct HookerAddresses {
@@ -45,7 +47,7 @@ pub trait KatanaHooker<EF: ExecutorFactory> {
     ///
     /// * `transaction` - The invoke transaction to be verified.
     async fn verify_invoke_tx_before_pool(&self, transaction: BroadcastedInvokeTransaction)
-        -> bool;
+    -> bool;
 
     /// Runs code right before a message to starknet
     /// is being sent via a direct transaction.
@@ -83,6 +85,12 @@ pub struct DefaultKatanaHooker<EF: ExecutorFactory> {
 impl<EF: ExecutorFactory> DefaultKatanaHooker<EF> {
     pub fn new() -> Self {
         DefaultKatanaHooker { sequencer: None, addresses: None }
+    }
+}
+
+impl<EF: ExecutorFactory> Default for DefaultKatanaHooker<EF> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

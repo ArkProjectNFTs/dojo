@@ -13,5 +13,5 @@ pub enum ApiKind {
     Torii,
     Dev,
     Saya,
-    Solis
+    Solis,
 }

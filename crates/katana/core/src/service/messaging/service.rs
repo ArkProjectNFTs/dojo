@@ -1,5 +1,7 @@
-use crate::hooker::KatanaHooker;
-use tokio::sync::RwLock as AsyncRwLock;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::{Future, FutureExt, Stream};
 use katana_executor::ExecutorFactory;
@@ -8,15 +10,13 @@ use katana_primitives::receipt::MessageToL1;
 use katana_primitives::transaction::{ExecutableTxWithHash, L1HandlerTx, TxHash};
 use katana_provider::traits::block::BlockNumberProvider;
 use katana_provider::traits::transaction::ReceiptProvider;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Duration;
+use tokio::sync::RwLock as AsyncRwLock;
 use tokio::time::{interval_at, Instant, Interval};
 use tracing::{error, info};
 
 use super::{MessagingConfig, Messenger, MessengerMode, MessengerResult, LOG_TARGET};
 use crate::backend::Backend;
+use crate::hooker::KatanaHooker;
 use crate::pool::TransactionPool;
 
 type MessagingFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -149,7 +149,8 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                     }
                     Err(e) => {
                         error!(target: LOG_TARGET, error = %e, "Error sending messages from block {}", block_num);
-                        // Even if there's an error, we should move to the next block to avoid infinite retries
+                        // Even if there's an error, we should move to the next block to avoid
+                        // infinite retries
                         Ok(Some((block_num, 0))) // Marking as processed to avoid retries
                     }
                 }
@@ -165,7 +166,8 @@ impl<EF: ExecutorFactory> MessagingService<EF> {
                     }
                     Err(e) => {
                         error!(target: LOG_TARGET, error = %e, "Error sending messages from block {}", block_num);
-                        // Even if there's an error, we should move to the next block to avoid infinite retries
+                        // Even if there's an error, we should move to the next block to avoid
+                        // infinite retries
                         Ok(Some((block_num, 0))) // Marking as processed to avoid retries
                     }
                 }
@@ -247,7 +249,8 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
                 }
                 Poll::Ready(Err(e)) => {
                     error!(target: LOG_TARGET, block = %pin.send_from_block, error = %e, "Error sending messages for block.");
-                    // Even if there's an error, we should move to the next block to avoid infinite retries
+                    // Even if there's an error, we should move to the next block to avoid infinite
+                    // retries
                     pin.send_from_block += 1;
                     return Poll::Pending;
                 }

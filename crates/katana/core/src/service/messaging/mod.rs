@@ -32,9 +32,11 @@
 //! configuration file following the `MessagingConfig` format. An example of this file can be found
 //! in the messaging contracts.
 
-use crate::hooker::KatanaHooker;
 use std::sync::Arc;
+
 use tokio::sync::RwLock as AsyncRwLock;
+
+use crate::hooker::KatanaHooker;
 
 mod ethereum;
 mod service;

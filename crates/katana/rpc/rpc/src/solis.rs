@@ -1,13 +1,14 @@
-use base64::decode;
 use std::sync::Arc;
 
-use crate::config::ServerConfig;
+use base64::decode;
 use jsonrpsee::core::{async_trait, Error as RpcError};
-use katana_rpc_types::error::solis::SolisApiError;
 use katana_core::hooker::HookerAddresses;
 use katana_core::sequencer::KatanaSequencer;
 use katana_executor::ExecutorFactory;
 use katana_rpc_api::solis::SolisApiServer;
+use katana_rpc_types::error::solis::SolisApiError;
+
+use crate::config::ServerConfig;
 pub struct SolisApi<EF: ExecutorFactory> {
     sequencer: Arc<KatanaSequencer<EF>>,
     pub rpc_user: String,

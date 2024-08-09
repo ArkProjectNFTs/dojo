@@ -2,7 +2,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::hooker::SolisHooker;
 use clap::{CommandFactory, Parser};
 use clap_complete::{generate, Shell};
 use console::Style;
@@ -23,10 +22,12 @@ use tokio::signal::ctrl_c;
 use tokio::sync::RwLock as AsyncRwLock;
 use tracing::info;
 
+use crate::hooker::SolisHooker;
+
 mod args;
-mod utils;
-mod hooker;
 mod contracts;
+mod hooker;
+mod utils;
 
 // Chain ID: 'SOLIS' cairo short string.
 pub const CHAIN_ID_SOLIS: FieldElement = FieldElement::from_mont([
@@ -116,17 +117,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executor_address = FieldElement::ZERO;
     let orderbook_address = FieldElement::ZERO;
 
-    let hooker:Arc<AsyncRwLock<dyn KatanaHooker<BlockifierFactory> + Send + Sync>> =
-        Arc::new(AsyncRwLock::new(SolisHooker::new(
-            sn_utils_reader,
-            orderbook_address,
-            executor_address,
-        )));
+    let hooker: Arc<AsyncRwLock<dyn KatanaHooker<BlockifierFactory> + Send + Sync>> = Arc::new(
+        AsyncRwLock::new(SolisHooker::new(sn_utils_reader, orderbook_address, executor_address)),
+    );
     // **
 
     let sequencer = Arc::new(
-        KatanaSequencer::new(executor_factory, sequencer_config, starknet_config, Some(hooker.clone()))
-            .await?,
+        KatanaSequencer::new(
+            executor_factory,
+            sequencer_config,
+            starknet_config,
+            Some(hooker.clone()),
+        )
+        .await?,
     );
     let NodeHandle { addr, handle, .. } = spawn(Arc::clone(&sequencer), server_config).await?;
 

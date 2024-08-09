@@ -1,10 +1,8 @@
-use starknet::{
-    accounts::{ExecutionEncoding, SingleOwnerAccount},
-    core::types::FieldElement,
-    providers::{jsonrpc::HttpTransport, AnyProvider, JsonRpcClient, Provider},
-    signers::{LocalWallet, SigningKey},
-};
-
+use starknet::accounts::{ExecutionEncoding, SingleOwnerAccount};
+use starknet::core::types::FieldElement;
+use starknet::providers::jsonrpc::HttpTransport;
+use starknet::providers::{AnyProvider, JsonRpcClient, Provider};
+use starknet::signers::{LocalWallet, SigningKey};
 use url::Url;
 
 /// Initializes a new account to interact with Starknet.
@@ -25,18 +23,9 @@ pub async fn new_account(
         AnyProvider::JsonRpcHttp(JsonRpcClient::new(HttpTransport::new(rpc_url.clone())));
 
     // TODO: need error instead of expect.
-    let chain_id = provider
-        .chain_id()
-        .await
-        .expect("couldn't get chain_id from provider");
+    let chain_id = provider.chain_id().await.expect("couldn't get chain_id from provider");
 
     let signer = LocalWallet::from(SigningKey::from_secret_scalar(private_key));
 
-    SingleOwnerAccount::new(
-        provider,
-        signer,
-        account_address,
-        chain_id,
-        ExecutionEncoding::Legacy,
-    )
+    SingleOwnerAccount::new(provider, signer, account_address, chain_id, ExecutionEncoding::Legacy)
 }

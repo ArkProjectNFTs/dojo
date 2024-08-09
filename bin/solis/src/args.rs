@@ -9,7 +9,7 @@
 //!   and leak detection functionality. See [jemalloc's opt.prof](https://jemalloc.net/jemalloc.3.html#opt.prof)
 //!   documentation for usage details. This is **not recommended on Windows**. See [here](https://rust-lang.github.io/rfcs/1974-global-allocators.html#jemalloc)
 //!   for more info.
-
+use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -230,7 +230,8 @@ impl KatanaArgs {
     }
 
     pub fn server_config(&self) -> ServerConfig {
-        let mut apis = vec![ApiKind::Starknet, ApiKind::Katana, ApiKind::Torii, ApiKind::Saya, ApiKind::Solis];
+        let mut apis =
+            vec![ApiKind::Starknet, ApiKind::Katana, ApiKind::Torii, ApiKind::Saya, ApiKind::Solis];
         // only enable `katana` API in dev mode
         if self.dev {
             apis.push(ApiKind::Dev);

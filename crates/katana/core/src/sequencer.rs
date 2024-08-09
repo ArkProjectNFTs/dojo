@@ -1,6 +1,3 @@
-use crate::hooker::KatanaHooker;
-use tokio::sync::RwLock as AsyncRwLock;
-
 use std::cmp::Ordering;
 use std::iter::Skip;
 use std::slice::Iter;
@@ -27,11 +24,13 @@ use katana_provider::traits::transaction::{
     ReceiptProvider, TransactionProvider, TransactionsProviderExt,
 };
 use starknet::core::types::{BlockTag, EmittedEvent, EventsPage};
+use tokio::sync::RwLock as AsyncRwLock;
 use tracing::error;
 
 use crate::backend::config::StarknetConfig;
 use crate::backend::contract::StarknetContract;
 use crate::backend::Backend;
+use crate::hooker::KatanaHooker;
 use crate::pool::TransactionPool;
 use crate::sequencer_error::SequencerError;
 use crate::service::block_producer::{BlockProducer, BlockProducerMode, PendingExecutor};
@@ -94,7 +93,10 @@ impl<EF: ExecutorFactory> KatanaSequencer<EF> {
                 .await
                 .ok(),
                 None => {
-                    error!("Messaging service is enabled but no hooker is provided. Messaging service will not be started.");
+                    error!(
+                        "Messaging service is enabled but no hooker is provided. Messaging \
+                         service will not be started."
+                    );
                     None
                 }
             }
@@ -305,13 +307,10 @@ impl<EF: ExecutorFactory> KatanaSequencer<EF> {
 
         let tx @ Some(_) = tx else {
             return Ok(self.pending_executor().as_ref().and_then(|exec| {
-                exec.read().transactions().iter().find_map(|tx| {
-                    if tx.0.hash == *hash {
-                        Some(tx.0.clone())
-                    } else {
-                        None
-                    }
-                })
+                exec.read()
+                    .transactions()
+                    .iter()
+                    .find_map(|tx| if tx.0.hash == *hash { Some(tx.0.clone()) } else { None })
             }));
         };
 
@@ -519,9 +518,10 @@ fn filter_events_by_params(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use katana_executor::implementation::noop::NoopExecutorFactory;
     use katana_provider::traits::block::BlockNumberProvider;
+
+    use super::*;
     #[tokio::test]
     async fn init_interval_block_producer_with_correct_block_env() {
         let executor_factory = NoopExecutorFactory::default();
