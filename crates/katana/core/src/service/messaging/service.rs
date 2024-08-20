@@ -222,12 +222,15 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
             }
         }
 
+        let mut messaging_config = pin.messaging_config.write().unwrap();
         // Poll the gathering future
         if let Some(mut gather_fut) = pin.msg_gather_fut.take() {
             match gather_fut.poll_unpin(cx) {
                 Poll::Ready(Ok((last_block, msg_count))) => {
                     info!(target: LOG_TARGET, "Gathered {} transactions up to block {}", msg_count, last_block);
                     pin.gather_from_block = last_block + 1;
+                    messaging_config.gather_from_block = pin.gather_from_block;
+                    let _ = messaging_config.save();
                     return Poll::Ready(Some(MessagingOutcome::Gather {
                         lastest_block: last_block,
                         msg_count,
@@ -248,7 +251,6 @@ impl<EF: ExecutorFactory> Stream for MessagingService<EF> {
                     info!(target: LOG_TARGET, "Sent {} messages from block {}", msg_count, block_num);
                     pin.send_from_block = block_num + 1;
                     // update the config with the latest block number sent.
-                    let mut messaging_config = pin.messaging_config.write().unwrap();
                     messaging_config.send_from_block = pin.send_from_block;
                     let _ = messaging_config.save();
                     return Poll::Ready(Some(MessagingOutcome::Send { block_num, msg_count }));
