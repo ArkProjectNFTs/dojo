@@ -57,7 +57,7 @@ impl TestSequencer {
         let executor_factory = BlockifierFactory::new(cfg_env, simulation_flags);
 
         let sequencer = Arc::new(
-            KatanaSequencer::new(executor_factory, config, starknet_config)
+            KatanaSequencer::new(executor_factory, config, starknet_config, None)
                 .await
                 .expect("Failed to create sequencer"),
         );
@@ -69,12 +69,15 @@ impl TestSequencer {
                 host: "127.0.0.1".into(),
                 max_connections: 100,
                 allowed_origins: None,
+                rpc_password: "password".into(),
+                rpc_user: "user".into(),
                 apis: vec![
                     ApiKind::Starknet,
                     ApiKind::Katana,
                     ApiKind::Dev,
                     ApiKind::Saya,
                     ApiKind::Torii,
+                    ApiKind::Solis,
                 ],
             },
         )

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-
+use crate::hooker::KatanaHooker;
 use anyhow::Result;
 use async_trait::async_trait;
 use katana_primitives::chain::ChainId;
@@ -14,31 +13,36 @@ use starknet::macros::{felt, selector};
 use starknet::providers::jsonrpc::HttpTransport;
 use starknet::providers::{AnyProvider, JsonRpcClient, Provider};
 use starknet::signers::{LocalWallet, SigningKey};
-use tracing::{debug, error, trace, warn};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::RwLock as AsyncRwLock;
+use tracing::{debug, error, info, trace, warn};
 use url::Url;
 
 use super::{Error, MessagingConfig, Messenger, MessengerResult, LOG_TARGET};
 
-/// As messaging in starknet is only possible with EthAddress in the `to_address`
-/// field, we have to set magic value to understand what the user want to do.
-/// In the case of execution -> the felt 'EXE' will be passed.
-/// And for normal messages, the felt 'MSG' is used.
-/// Those values are very not likely a valid account address on starknet.
 const MSG_MAGIC: FieldElement = felt!("0x4d5347");
 const EXE_MAGIC: FieldElement = felt!("0x455845");
 
 pub const HASH_EXEC: FieldElement = felt!("0xee");
 
-pub struct StarknetMessaging {
+pub struct StarknetMessaging<EF: katana_executor::ExecutorFactory + Send + Sync> {
     chain_id: FieldElement,
     provider: AnyProvider,
     wallet: LocalWallet,
     sender_account_address: FieldElement,
     messaging_contract_address: FieldElement,
+    hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
+    event_cache: Arc<AsyncRwLock<HashSet<String>>>,
+    latest_block: Arc<AtomicU64>,
 }
 
-impl StarknetMessaging {
-    pub async fn new(config: MessagingConfig) -> Result<StarknetMessaging> {
+impl<EF: katana_executor::ExecutorFactory + Send + Sync> StarknetMessaging<EF> {
+    pub async fn new(
+        config: MessagingConfig,
+        hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
+    ) -> Result<StarknetMessaging<EF>> {
         let provider = AnyProvider::JsonRpcHttp(JsonRpcClient::new(HttpTransport::new(
             Url::parse(&config.rpc_url)?,
         )));
@@ -46,10 +50,13 @@ impl StarknetMessaging {
         let private_key = FieldElement::from_hex_be(&config.private_key)?;
         let key = SigningKey::from_secret_scalar(private_key);
         let wallet = LocalWallet::from_signing_key(key);
+        let latest_block = Arc::new(AtomicU64::new(0));
 
         let chain_id = provider.chain_id().await?;
         let sender_account_address = FieldElement::from_hex_be(&config.sender_address)?;
         let messaging_contract_address = FieldElement::from_hex_be(&config.contract_address)?;
+
+        info!(target: LOG_TARGET, "StarknetMessaging instance created.");
 
         Ok(StarknetMessaging {
             wallet,
@@ -57,6 +64,9 @@ impl StarknetMessaging {
             chain_id,
             sender_account_address,
             messaging_contract_address,
+            hooker,
+            event_cache: Arc::new(AsyncRwLock::new(HashSet::new())),
+            latest_block,
         })
     }
 
@@ -106,10 +116,74 @@ impl StarknetMessaging {
         Ok(block_to_events)
     }
 
-    /// Sends an invoke TX on starknet.
+    async fn fetch_pending_events(&self, chain_id: ChainId) -> MessengerResult<Vec<L1HandlerTx>> {
+        let mut l1_handler_txs: Vec<L1HandlerTx> = vec![];
+        let mut continuation_token: Option<String> = None;
+    
+        loop {
+            debug!(target: LOG_TARGET, "Fetching pending events with continuation token: {:?}", continuation_token);
+    
+            let filter = EventFilter {
+                from_block: Some(BlockId::Tag(BlockTag::Pending)),
+                to_block: Some(BlockId::Tag(BlockTag::Pending)),
+                address: Some(self.messaging_contract_address),
+                keys: None,
+            };
+    
+            let event_page = self
+                .provider
+                .get_events(filter.clone(), continuation_token.clone(), 200)
+                .await
+                .map_err(|e| {
+                    error!(target: LOG_TARGET, "Error fetching pending events: {:?}", e);
+                    Error::SendError
+                })?;
+    
+            debug!(target: LOG_TARGET, "Fetched {} pending events", event_page.events.len());
+    
+            for event in event_page.events {
+                let event_id = event.transaction_hash.to_string();
+                
+                // Check if we've already processed this event
+                let cache = self.event_cache.read().await;
+                if cache.contains(&event_id) {
+                    debug!(target: LOG_TARGET, "Pending event {} already processed, skipping", event_id);
+                    continue;
+                }
+                drop(cache);
+    
+                if let Ok(tx) = l1_handler_tx_from_event(&event, chain_id) {
+                    if let Ok((from, to, selector)) = info_from_event(&event) {
+                        let hooker = Arc::clone(&self.hooker);
+                        let is_message_accepted = hooker
+                            .read()
+                            .await
+                            .verify_message_to_appchain(from, to, selector)
+                            .await;
+                        if is_message_accepted {
+                            debug!(target: LOG_TARGET, "Pending event {} accepted", event_id);
+                            l1_handler_txs.push(tx);
+                            
+                            // Add to cache after processing
+                            let mut cache = self.event_cache.write().await;
+                            cache.insert(event_id);
+                        }
+                    }
+                }
+            }
+    
+            continuation_token = event_page.continuation_token;
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+    
+        debug!(target: LOG_TARGET, "Total pending transactions gathered: {}", l1_handler_txs.len());
+        Ok(l1_handler_txs)
+    }
+
     async fn send_invoke_tx(&self, calls: Vec<Call>) -> Result<FieldElement> {
         let signer = Arc::new(&self.wallet);
-
         let mut account = SingleOwnerAccount::new(
             &self.provider,
             signer,
@@ -118,36 +192,61 @@ impl StarknetMessaging {
             ExecutionEncoding::New,
         );
 
+        info!(target: LOG_TARGET, "Setting block ID to Pending.");
         account.set_block_id(BlockId::Tag(BlockTag::Pending));
 
-        // TODO: we need to have maximum fee configurable.
         let execution = account.execute(calls).fee_estimate_multiplier(10f64);
-        let estimated_fee = (execution.estimate_fee().await?.overall_fee) * 10u64.into();
-        let tx = execution.max_fee(estimated_fee).send().await?;
+        let estimated_fee = match execution.estimate_fee().await {
+            Ok(fee) => {
+                info!(target: LOG_TARGET, "Estimated fee: {:?}", fee.overall_fee);
+                (fee.overall_fee) * 10u64.into()
+            }
+            Err(e) => {
+                error!(target: LOG_TARGET, "Error estimating fee: {:?}", e);
+                return Err(e.into());
+            }
+        };
 
-        Ok(tx.transaction_hash)
+        let execution_with_fee = execution.max_fee(estimated_fee);
+        info!(target: LOG_TARGET, "Sending invoke transaction with max fee: {:?}", estimated_fee);
+
+        match execution_with_fee.send().await {
+            Ok(tx) => {
+                info!(target: LOG_TARGET, "Transaction successful: {:?}", tx);
+                Ok(tx.transaction_hash)
+            }
+            Err(e) => {
+                error!(target: LOG_TARGET, "Error sending transaction: {:?}", e);
+                Err(e.into())
+            }
+        }
     }
 
-    /// Sends messages hashes to settlement layer by sending a transaction.
     async fn send_hashes(&self, mut hashes: Vec<FieldElement>) -> MessengerResult<FieldElement> {
         hashes.retain(|&x| x != HASH_EXEC);
 
         if hashes.is_empty() {
+            info!(target: LOG_TARGET, "No hashes to send.");
             return Ok(FieldElement::ZERO);
         }
 
-        let mut calldata = hashes;
+        info!(target: LOG_TARGET, "Preparing to send {} hashes.", hashes.len());
+
+        let mut calldata = hashes.clone();
         calldata.insert(0, calldata.len().into());
 
         let call = Call {
             selector: selector!("add_messages_hashes_from_appchain"),
             to: self.messaging_contract_address,
-            calldata,
+            calldata: calldata.clone(),
         };
+
+        info!(target: LOG_TARGET, "Sending hashes to Starknet: {:?}", calldata);
 
         match self.send_invoke_tx(vec![call]).await {
             Ok(tx_hash) => {
                 trace!(target: LOG_TARGET, tx_hash = %format!("{:#064x}", tx_hash), "Hashes sending transaction.");
+                info!(target: LOG_TARGET, "Successfully sent hashes with transaction hash: {:#064x}", tx_hash);
                 Ok(tx_hash)
             }
             Err(e) => {
@@ -159,7 +258,7 @@ impl StarknetMessaging {
 }
 
 #[async_trait]
-impl Messenger for StarknetMessaging {
+impl<EF: katana_executor::ExecutorFactory + Send + Sync> Messenger for StarknetMessaging<EF> {
     type MessageHash = FieldElement;
     type MessageTransaction = L1HandlerTx;
 
@@ -168,53 +267,120 @@ impl Messenger for StarknetMessaging {
         from_block: u64,
         max_blocks: u64,
         chain_id: ChainId,
-    ) -> MessengerResult<(u64, Vec<Self::MessageTransaction>)> {
+    ) -> MessengerResult<(u64, Vec<L1HandlerTx>)> {
+        debug!(target: LOG_TARGET, "Starting gather_messages with from_block: {}, max_blocks: {}", from_block, max_blocks);
+    
+        // First get the latest block number
         let chain_latest_block: u64 = match self.provider.block_number().await {
-            Ok(n) => n,
-            Err(_) => {
+            Ok(n) => {
+                debug!(target: LOG_TARGET, "Latest block number on chain: {}", n);
+                n
+            }
+            Err(e) => {
                 warn!(
                     target: LOG_TARGET,
-                    "Couldn't fetch settlement chain last block number. \nSkipped, retry at the \
-                     next tick."
+                    "Couldn't fetch settlement chain last block number. Skipped, retry at the next tick. Error: {:?}", e
                 );
                 return Err(Error::SendError);
             }
         };
-
+    
+        let mut l1_handler_txs = Vec::new();
+        
+        // First gather pending events
+        debug!(target: LOG_TARGET, "Fetching pending events first");
+        let pending_txs = self.fetch_pending_events(chain_id).await?;
+        l1_handler_txs.extend(pending_txs);
+        debug!(target: LOG_TARGET, "Found {} pending transactions", l1_handler_txs.len());
+    
+        // Then check if we need to process blocks
         if from_block > chain_latest_block {
-            // Nothing to fetch, we can skip waiting the next tick.
-            return Ok((chain_latest_block, vec![]));
+            debug!(target: LOG_TARGET, "from_block ({}) > chain_latest_block ({}), returning with only pending events", from_block, chain_latest_block);
+            return Ok((chain_latest_block, l1_handler_txs));
         }
-
-        // +1 as the from_block counts as 1 block fetched.
-        let to_block = if from_block + max_blocks + 1 < chain_latest_block {
+    
+        // Calculate the block range to process
+        let to_block = if from_block + max_blocks < chain_latest_block {
             from_block + max_blocks
         } else {
             chain_latest_block
         };
-
-        let mut l1_handler_txs: Vec<L1HandlerTx> = vec![];
-
-        self.fetch_events(BlockId::Number(from_block), BlockId::Number(to_block))
-            .await
-            .map_err(|_| Error::SendError)
-            .unwrap()
-            .iter()
-            .for_each(|(block_number, block_events)| {
-                debug!(
-                    target: LOG_TARGET,
-                    block_number = %block_number,
-                    events_count = %block_events.len(),
-                    "Converting events of block into L1HandlerTx."
-                );
-
-                block_events.iter().for_each(|e| {
-                    if let Ok(tx) = l1_handler_tx_from_event(e, chain_id) {
-                        l1_handler_txs.push(tx)
+        debug!(target: LOG_TARGET, "Fetching confirmed events from block {} to {}", from_block, to_block);
+    
+        // Now fetch events from confirmed blocks
+        match self.fetch_events(BlockId::Number(from_block), BlockId::Number(to_block)).await {
+            Ok(events_by_block) => {
+                for (block_number, block_events) in events_by_block.iter() {
+                    debug!(
+                        target: LOG_TARGET,
+                        block_number = %block_number,
+                        events_count = %block_events.len(),
+                        "Processing confirmed events for block"
+                    );
+    
+                    for event in block_events {
+                        let event_id = event.transaction_hash.to_string();
+                        
+                        // Check if we've already processed this event
+                        let cache = self.event_cache.read().await;
+                        if cache.contains(&event_id) {
+                            debug!(target: LOG_TARGET, "Event {} already processed, skipping", event_id);
+                            continue;
+                        }
+                        drop(cache); // Release the read lock
+    
+                        if let Ok(tx) = l1_handler_tx_from_event(event, chain_id) {
+                            if let Ok((from, to, selector)) = info_from_event(event) {
+                                let hooker = Arc::clone(&self.hooker);
+                                let is_message_accepted = hooker
+                                    .read()
+                                    .await
+                                    .verify_message_to_appchain(from, to, selector)
+                                    .await;
+                                
+                                if is_message_accepted {
+                                    debug!(
+                                        target: LOG_TARGET,
+                                        "Message from block {} accepted: from {:?} to {:?} with selector {:?}", 
+                                        block_number, from, to, selector
+                                    );
+                                    l1_handler_txs.push(tx);
+                                    
+                                    // Add to cache after processing
+                                    let mut cache = self.event_cache.write().await;
+                                    cache.insert(event_id);
+                                } else {
+                                    debug!(
+                                        target: LOG_TARGET,
+                                        "Message from block {} not accepted: from {:?} to {:?} with selector {:?}", 
+                                        block_number, from, to, selector
+                                    );
+                                }
+                            }
+                        }
                     }
-                })
-            });
-
+                }
+            }
+            Err(e) => {
+                error!(target: LOG_TARGET, "Error fetching confirmed events: {:?}", e);
+                return Err(Error::SendError);
+            }
+        }
+    
+        // We only clear the cache if we've moved to a new latest block to avoid reprocessing events
+        let previous_block = self.latest_block.load(Ordering::Relaxed);
+        if previous_block < chain_latest_block {
+            debug!(target: LOG_TARGET, "Moving to new latest block {} from {}, clearing cache", chain_latest_block, previous_block);
+            self.event_cache.write().await.clear();
+            self.latest_block.store(chain_latest_block, Ordering::Relaxed);
+        }
+    
+        info!(
+            target: LOG_TARGET,
+            "Total messages gathered: {} (including pending)", 
+            l1_handler_txs.len(),
+        );
+    
         Ok((to_block, l1_handler_txs))
     }
 
@@ -223,41 +389,46 @@ impl Messenger for StarknetMessaging {
         messages: &[MessageToL1],
     ) -> MessengerResult<Vec<Self::MessageHash>> {
         if messages.is_empty() {
+            info!(target: LOG_TARGET, "No messages to send.");
             return Ok(vec![]);
         }
 
         let (hashes, calls) = parse_messages(messages)?;
-
-        if !calls.is_empty() {
-            match self.send_invoke_tx(calls).await {
-                Ok(tx_hash) => {
-                    trace!(target: LOG_TARGET, tx_hash = %format!("{:#064x}", tx_hash), "Invoke transaction hash.");
-                }
-                Err(e) => {
-                    error!(target: LOG_TARGET, error = %e, "Sending invoke tx on Starknet.");
-                    return Err(Error::SendError);
-                }
-            };
+        for call in &calls {
+            if !self.hooker.read().await.verify_tx_for_starknet(call.clone()).await {
+                warn!(target: LOG_TARGET, "Call verification failed for call: {:?}", call);
+                continue;
+            }
         }
 
-        self.send_hashes(hashes.clone()).await?;
+        if !calls.is_empty() {
+            info!(target: LOG_TARGET, "Sending {} calls.", calls.len());
+            if let Err(e) = self.send_invoke_tx(calls.clone()).await {
+                error!(target: LOG_TARGET, error = %e, "Error sending invoke transaction.");
+                for call in calls {
+                    self.hooker.read().await.on_starknet_tx_failed(call).await;
+                }
+                return Err(Error::SendError);
+            }
+            info!(target: LOG_TARGET, "Successfully sent invoke transaction.");
+        }
 
+        if let Err(e) = self.send_hashes(hashes.clone()).await {
+            error!(target: LOG_TARGET, error = %e, "Error sending hashes.");
+            return Err(Error::SendError);
+        }
+        info!(target: LOG_TARGET, "Successfully sent hashes.");
+
+        info!(target: LOG_TARGET, "Finished sending messages.");
         Ok(hashes)
     }
 }
 
-/// Parses messages sent by cairo contracts to compute their hashes.
-///
-/// Messages can also be labelled as EXE, which in this case generate a `Call`
-/// additionally to the hash.
 fn parse_messages(messages: &[MessageToL1]) -> MessengerResult<(Vec<FieldElement>, Vec<Call>)> {
     let mut hashes: Vec<FieldElement> = vec![];
     let mut calls: Vec<Call> = vec![];
 
     for m in messages {
-        // Field `to_address` is restricted to eth addresses space. So the
-        // `to_address` is set to 'EXE'/'MSG' to indicate that the message
-        // has to be executed or sent normally.
         let magic = m.to_address;
 
         if magic == EXE_MAGIC {
@@ -267,13 +438,13 @@ fn parse_messages(messages: &[MessageToL1]) -> MessengerResult<(Vec<FieldElement
                     "Message execution is expecting a payload of at least length \
                      2. With [0] being the contract address, and [1] the selector.",
                 );
+                continue;
             }
 
             let to = m.payload[0];
             let selector = m.payload[1];
 
             let mut calldata = vec![];
-            // We must exclude the `to_address` and `selector` from the actual payload.
             if m.payload.len() >= 3 {
                 calldata.extend(m.payload[2..].to_vec());
             }
@@ -281,15 +452,7 @@ fn parse_messages(messages: &[MessageToL1]) -> MessengerResult<(Vec<FieldElement
             calls.push(Call { to, selector, calldata });
             hashes.push(HASH_EXEC);
         } else if magic == MSG_MAGIC {
-            // In the case or regular message, we compute the message's hash
-            // which will then be sent in a transaction to be registered.
-
-            // As to_address is used by the magic, the `to_address` we want
-            // is the first element of the payload.
             let to_address = m.payload[0];
-
-            // Then, the payload must be changed to only keep the rest of the
-            // data, without the first element that was the `to_address`.
             let payload = &m.payload[1..];
 
             let mut buf: Vec<u8> = vec![];
@@ -302,7 +465,6 @@ fn parse_messages(messages: &[MessageToL1]) -> MessengerResult<(Vec<FieldElement
 
             hashes.push(starknet_keccak(&buf));
         } else {
-            // Skip the message if no valid magic number found.
             warn!(target: LOG_TARGET, magic = ?magic, "Invalid message to_address magic value.");
             continue;
         }
@@ -325,14 +487,11 @@ fn l1_handler_tx_from_event(event: &EmittedEvent, chain_id: ChainId) -> Result<L
         error!(target: LOG_TARGET, "Event MessageSentToAppchain is not well formatted.");
     }
 
-    // See contrat appchain_messaging.cairo for MessageSentToAppchain event.
     let from_address = event.keys[2];
     let to_address = event.keys[3];
     let entry_point_selector = event.data[0];
     let nonce = event.data[1];
 
-    // Skip the length of the serialized array for the payload which is data[2].
-    // Payload starts at data[3].
     let mut calldata = vec![from_address];
     calldata.extend(&event.data[3..]);
 
@@ -343,7 +502,6 @@ fn l1_handler_tx_from_event(event: &EmittedEvent, chain_id: ChainId) -> Result<L
         calldata,
         chain_id,
         message_hash,
-        // This is the min value paid on L1 for the message to be sent to L2.
         paid_fee_on_l1: 30000_u128,
         entry_point_selector,
         version: FieldElement::ZERO,
@@ -351,9 +509,28 @@ fn l1_handler_tx_from_event(event: &EmittedEvent, chain_id: ChainId) -> Result<L
     })
 }
 
+fn info_from_event(event: &EmittedEvent) -> Result<(FieldElement, FieldElement, FieldElement)> {
+    if event.keys[0] != selector!("MessageSentToAppchain") {
+        debug!(
+            target: LOG_TARGET,
+            "Event with key {:?} can't be converted into L1HandlerTx", event.keys[0],
+        );
+        return Err(Error::GatherError.into());
+    }
+
+    if event.keys.len() != 4 || event.data.len() < 2 {
+        error!(target: LOG_TARGET, "Event MessageSentToAppchain is not well formatted");
+    }
+
+    let from_address = event.keys[2];
+    let to_address = event.keys[3];
+    let entry_point_selector = event.data[0];
+
+    Ok((from_address, to_address, entry_point_selector))
+}
+
 #[cfg(test)]
 mod tests {
-
     use katana_primitives::utils::transaction::compute_l1_handler_tx_hash;
     use starknet::macros::felt;
 
