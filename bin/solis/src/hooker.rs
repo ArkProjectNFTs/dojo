@@ -12,23 +12,21 @@ use katana_primitives::chain::ChainId;
 use katana_primitives::contract::ContractAddress;
 use katana_primitives::transaction::{ExecutableTx, ExecutableTxWithHash, L1HandlerTx};
 use katana_primitives::utils::transaction::compute_l1_message_hash;
+use serde_json::json;
+use serde_json::Value;
 use starknet::accounts::Call;
 use starknet::core::types::BroadcastedInvokeTransaction;
 use starknet::core::types::FieldElement;
 use starknet::macros::selector;
 use starknet::providers::Provider;
-use std::sync::Arc;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::io::Read;
-use serde_json::Value;
+use std::io::Write;
 use std::path::Path;
-use serde_json::json;
-
+use std::sync::Arc;
 
 const FILE_PATH_ADDRESSES: &str = "addresses.json";
-
 
 use crate::contracts::orderbook::{OrderV1, RouteType};
 use crate::contracts::starknet_utils::StarknetUtilsReader;
@@ -92,10 +90,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
         );
 
         // check the current owner of the token.
-        let owner = sn_utils_reader_nft_address
-            .ownerOf(&ownership_verifier.token_id)
-            .call()
-            .await;
+        let owner = sn_utils_reader_nft_address.ownerOf(&ownership_verifier.token_id).call().await;
 
         if let Ok(owner_address) = owner {
             if owner_address != ownership_verifier.current_owner {
@@ -145,10 +140,8 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
         }
 
         // check the balance
-        let balance = sn_utils_reader_erc20_address
-            .balanceOf(&balance_verifier.offerer)
-            .call()
-            .await;
+        let balance =
+            sn_utils_reader_erc20_address.balanceOf(&balance_verifier.offerer).call().await;
         if let Ok(balance) = balance {
             if balance < balance_verifier.start_amount {
                 tracing::trace!(
@@ -179,10 +172,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
         // ERC721 to ERC20
         if order.route == RouteType::Erc721ToErc20 {
             let token_id = order.token_id.clone().unwrap();
-            let n_token_id = U256 {
-                low: token_id.low,
-                high: token_id.high,
-            };
+            let n_token_id = U256 { low: token_id.low, high: token_id.high };
 
             let verifier = OwnershipVerifier {
                 token_address: ContractAddress(order.token_address.into()),
@@ -220,7 +210,8 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
 impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
     SolisHooker<P, EF>
 {
-    fn get_addresses_from_file() -> Result<(FieldElement, FieldElement), Box<dyn std::error::Error>> {
+    fn get_addresses_from_file() -> Result<(FieldElement, FieldElement), Box<dyn std::error::Error>>
+    {
         let mut file = match File::open(FILE_PATH_ADDRESSES) {
             Ok(file) => file,
             Err(_) => return Err("File not found".into()),
@@ -264,7 +255,9 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
         orderbook_address: FieldElement,
         sn_executor_address: FieldElement,
     ) -> Self {
-        let (orderbook_address, sn_executor_address) = if orderbook_address == FieldElement::ZERO && sn_executor_address == FieldElement::ZERO {
+        let (orderbook_address, sn_executor_address) = if orderbook_address == FieldElement::ZERO
+            && sn_executor_address == FieldElement::ZERO
+        {
             match Self::get_addresses_from_file() {
                 Ok((orderbook, executor)) => (orderbook, executor),
                 Err(e) => {
@@ -276,12 +269,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
             (orderbook_address, sn_executor_address)
         };
 
-        Self {
-            orderbook_address,
-            sn_utils_reader,
-            sn_executor_address,
-            sequencer: None,
-        }
+        Self { orderbook_address, sn_utils_reader, sn_executor_address, sequencer: None }
     }
 
     /// Retrieves a reference to the sequencer.
@@ -289,9 +277,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
     pub fn sequencer_ref(&self) -> &Arc<KatanaSequencer<EF>> {
         // The expect is used here as it must always be set by Katana core.
         // If not set, the merge on Katana may be revised.
-        self.sequencer
-            .as_ref()
-            .expect("Sequencer must be set to get a reference to it")
+        self.sequencer.as_ref().expect("Sequencer must be set to get a reference to it")
     }
 
     /// Adds a `L1HandlerTransaction` to the transaction pool that is directed to the
@@ -369,10 +355,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
         self.sn_executor_address = addresses.executor_starknet;
 
         let path = Path::new(FILE_PATH_ADDRESSES);
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&path);
+        let file = OpenOptions::new().write(true).create(true).open(&path);
 
         match file {
             Ok(mut file) => {
@@ -418,19 +401,13 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
         &self,
         transaction: BroadcastedInvokeTransaction,
     ) -> bool {
-        info!(
-            "HOOKER: verify_invoke_tx_before_pool called with transaction: {:?}",
-            transaction
-        );
+        info!("HOOKER: verify_invoke_tx_before_pool called with transaction: {:?}", transaction);
 
         let calldata = match transaction {
             BroadcastedInvokeTransaction::V1(v1_transaction) => v1_transaction.calldata,
             BroadcastedInvokeTransaction::V3(v3_transaction) => v3_transaction.calldata,
         };
-        info!(
-            "HOOKER: cairo_deserialize called with transaction: {:?}",
-            calldata
-        );
+        info!("HOOKER: cairo_deserialize called with transaction: {:?}", calldata);
 
         let calls = match Vec::<TxCall>::cairo_deserialize(&calldata, 0) {
             Ok(calls) => calls,
@@ -517,7 +494,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
 
     async fn on_starknet_tx_failed(&self, call: Call) {
         println!("Starknet tx failed: {:?}", call);
-        println!("orderhash: {:?}:", execution_info.order_hash)
+
         let execution_info = match ExecutionInfo::cairo_deserialize(&call.calldata, 0) {
             Ok(execution_info) => execution_info,
             Err(e) => {
@@ -526,6 +503,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
             }
         };
 
+        println!("orderhash: {:?}:", execution_info.order_hash);
         // rollback the status
         let status = CancelStatus::CancelledUser;
         self.add_l1_handler_transaction_for_orderbook(
