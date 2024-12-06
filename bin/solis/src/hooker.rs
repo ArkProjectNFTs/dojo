@@ -517,7 +517,7 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
 
     async fn on_starknet_tx_failed(&self, call: Call) {
         println!("Starknet tx failed: {:?}", call);
-
+        println!("orderhash: {:?}:", execution_info.order_hash)
         let execution_info = match ExecutionInfo::cairo_deserialize(&call.calldata, 0) {
             Ok(execution_info) => execution_info,
             Err(e) => {
@@ -527,9 +527,10 @@ impl<P: Provider + Sync + Send + 'static + std::fmt::Debug, EF: ExecutorFactory>
         };
 
         // rollback the status
+        let status = CancelStatus::CancelledUser;
         self.add_l1_handler_transaction_for_orderbook(
             selector!("rollback_status_order"),
-            &[execution_info.order_hash],
+            &[execution_info.order_hash, status.to_u32().into()],
         );
     }
 }
