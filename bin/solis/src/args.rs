@@ -9,7 +9,7 @@
 //!   and leak detection functionality. See [jemalloc's opt.prof](https://jemalloc.net/jemalloc.3.html#opt.prof)
 //!   documentation for usage details. This is **not recommended on Windows**. See [here](https://rust-lang.github.io/rfcs/1974-global-allocators.html#jemalloc)
 //!   for more info.
-
+use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -117,7 +117,7 @@ pub enum Commands {
 #[derive(Debug, Args, Clone)]
 pub struct ServerOptions {
     #[arg(short, long)]
-    #[arg(default_value = "5050")]
+    #[arg(default_value = "7777")]
     #[arg(help = "Port number to listen on.")]
     pub port: u16,
 
@@ -174,7 +174,7 @@ pub struct EnvironmentOptions {
     #[arg(long_help = "The chain ID. If a raw hex string (`0x` prefix) is provided, then it'd \
                        used as the actual chain ID. Otherwise, it's represented as the raw \
                        ASCII values. It must be a valid Cairo short string.")]
-    #[arg(default_value = "KATANA")]
+    #[arg(default_value = "SOLIS")]
     #[arg(value_parser = ChainId::parse)]
     pub chain_id: ChainId,
 
@@ -230,11 +230,15 @@ impl KatanaArgs {
     }
 
     pub fn server_config(&self) -> ServerConfig {
-        let mut apis = vec![ApiKind::Starknet, ApiKind::Katana, ApiKind::Torii, ApiKind::Saya];
+        let mut apis = vec![ApiKind::Starknet, ApiKind::Katana, ApiKind::Torii, ApiKind::Saya, ApiKind::Solis];
         // only enable `katana` API in dev mode
         if self.dev {
             apis.push(ApiKind::Dev);
         }
+
+        let rpc_user = env::var("RPC_USER").unwrap_or_else(|_| "userDefault".to_string());
+        let rpc_password =
+            env::var("RPC_PASSWORD").unwrap_or_else(|_| "passwordDefault".to_string());
 
         ServerConfig {
             apis,
@@ -242,8 +246,8 @@ impl KatanaArgs {
             host: self.server.host.clone().unwrap_or("0.0.0.0".into()),
             max_connections: self.server.max_connections,
             allowed_origins: self.server.allowed_origins.clone(),
-            rpc_user: "user".into(),
-            rpc_password: "password".into(),
+            rpc_user,
+            rpc_password,
         }
     }
 

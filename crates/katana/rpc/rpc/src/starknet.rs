@@ -675,6 +675,13 @@ impl<EF: ExecutorFactory> StarknetApiServer for StarknetApi<EF> {
         &self,
         invoke_transaction: BroadcastedInvokeTx,
     ) -> RpcResult<InvokeTxResult> {
+
+        if let Some(hooker) = &self.inner.sequencer.hooker {
+            let tx = invoke_transaction.0.clone();
+            if !hooker.read().await.verify_invoke_tx_before_pool(tx).await {
+               return Err(StarknetApiError::SolisAssetFault.into());
+            }
+        }
         self.on_io_blocking_task(move |this| {
             if invoke_transaction.is_query() {
                 return Err(StarknetApiError::UnsupportedTransactionVersion.into());

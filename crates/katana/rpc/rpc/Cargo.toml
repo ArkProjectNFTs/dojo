@@ -16,6 +16,7 @@ katana-rpc-api.workspace = true
 katana-rpc-types-builder.workspace = true
 katana-rpc-types.workspace = true
 katana-tasks.workspace = true
+base64 = "0.13.0"
 
 anyhow.workspace = true
 flate2.workspace = true

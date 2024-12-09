@@ -32,12 +32,17 @@
 //! configuration file following the `MessagingConfig` format. An example of this file can be found
 //! in the messaging contracts.
 
+use crate::hooker::KatanaHooker;
+use std::sync::Arc;
+use tokio::sync::RwLock as AsyncRwLock;
+
 mod ethereum;
 mod service;
-#[cfg(feature = "starknet-messaging")]
 mod starknet;
 
 use std::path::Path;
+use std::fs::File;
+use std::io::Write;
 
 use ::starknet::providers::ProviderError as StarknetProviderError;
 use alloy_transport::TransportError;
@@ -46,16 +51,14 @@ use async_trait::async_trait;
 use ethereum::EthereumMessaging;
 use katana_primitives::chain::ChainId;
 use katana_primitives::receipt::MessageToL1;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 pub use self::service::{MessagingOutcome, MessagingService};
-#[cfg(feature = "starknet-messaging")]
 use self::starknet::StarknetMessaging;
 
 pub(crate) const LOG_TARGET: &str = "messaging";
 pub(crate) const CONFIG_CHAIN_ETHEREUM: &str = "ethereum";
-#[cfg(feature = "starknet-messaging")]
 pub(crate) const CONFIG_CHAIN_STARKNET: &str = "starknet";
 
 type MessengerResult<T> = Result<T, Error>;
@@ -89,7 +92,7 @@ impl From<TransportError> for Error {
 }
 
 /// The config used to initialize the messaging service.
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone, Serialize)]
 pub struct MessagingConfig {
     /// The settlement chain.
     pub chain: String,
@@ -106,7 +109,11 @@ pub struct MessagingConfig {
     /// from/to the settlement chain.
     pub interval: u64,
     /// The block on settlement chain from where Katana will start fetching messages.
-    pub from_block: u64,
+    pub gather_from_block: u64,
+    /// The block from where sequencer wil start sending messages.
+    pub send_from_block: u64,
+    /// Path to the config file.
+    pub config_file: String,
 }
 
 impl MessagingConfig {
@@ -118,7 +125,24 @@ impl MessagingConfig {
 
     /// This is used as the clap `value_parser` implementation
     pub fn parse(path: &str) -> Result<Self, String> {
-        Self::load(path).map_err(|e| e.to_string())
+        let mut config = Self::load(path).map_err(|e| e.to_string())?;
+        config.config_file = path.to_string();
+        config.save().map_err(|e| e.to_string())?;
+        Ok(config)
+    }
+
+    /// Save the config to a JSON file.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        if self.config_file.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Config file path is empty",
+            ));
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        let mut file = File::create(&self.config_file)?;
+        file.write_all(json.as_bytes())?;
+        Ok(())
     }
 }
 
@@ -162,14 +186,16 @@ pub trait Messenger {
     ) -> MessengerResult<Vec<Self::MessageHash>>;
 }
 
-pub enum MessengerMode {
+pub enum MessengerMode<EF: katana_executor::ExecutorFactory + Send + Sync> {
     Ethereum(EthereumMessaging),
-    #[cfg(feature = "starknet-messaging")]
-    Starknet(StarknetMessaging),
+    Starknet(StarknetMessaging<EF>),
 }
 
-impl MessengerMode {
-    pub async fn from_config(config: MessagingConfig) -> MessengerResult<Self> {
+impl<EF: katana_executor::ExecutorFactory + Send + Sync> MessengerMode<EF> {
+    pub async fn from_config(
+        config: MessagingConfig,
+        hooker: Arc<AsyncRwLock<dyn KatanaHooker<EF> + Send + Sync>>,
+    ) -> MessengerResult<Self> {
         match config.chain.as_str() {
             CONFIG_CHAIN_ETHEREUM => match EthereumMessaging::new(config).await {
                 Ok(m_eth) => {
@@ -182,8 +208,7 @@ impl MessengerMode {
                 }
             },
 
-            #[cfg(feature = "starknet-messaging")]
-            CONFIG_CHAIN_STARKNET => match StarknetMessaging::new(config).await {
+            CONFIG_CHAIN_STARKNET => match StarknetMessaging::new(config, hooker).await {
                 Ok(m_sn) => {
                     info!(target: LOG_TARGET, "Messaging enabled [Starknet].");
                     Ok(MessengerMode::Starknet(m_sn))
