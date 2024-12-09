@@ -204,46 +204,38 @@ impl<EF: katana_executor::ExecutorFactory + Send + Sync> Messenger for StarknetM
         let chain_latest_block: u64 = match self.provider.block_number().await {
             Ok(n) => n,
             Err(_) => {
-                warn!(
-                    target: LOG_TARGET,
-                    "Couldn't fetch settlement chain last block number. \nSkipped, retry at the \
-                     next tick."
-                );
+                warn!(target: LOG_TARGET, "Couldn't fetch settlement chain last block number");
                 return Err(Error::SendError);
             }
         };
-
+    
         if from_block > chain_latest_block {
-            // Nothing to fetch, we can skip waiting the next tick.
             return Ok((chain_latest_block, vec![]));
         }
-
-        // +1 as the from_block counts as 1 block fetched.
-        let to_block = if from_block + max_blocks + 1 < chain_latest_block {
-            from_block + max_blocks
-        } else {
-            chain_latest_block
-        };
-
+    
+        // Instead of skipping blocks, process them sequentially
+        let to_block = std::cmp::min(from_block + max_blocks, chain_latest_block);
+        
         let mut l1_handler_txs: Vec<L1HandlerTx> = vec![];
-
-        self.fetch_events(BlockId::Number(from_block), BlockId::Number(to_block))
-            .await
-            .map_err(|_| Error::SendError)
-            .unwrap()
-            .iter()
-            .for_each(|e| {
-                debug!(
-                    target: LOG_TARGET,
-                    event = ?e,
-                    "Converting event into L1HandlerTx."
-                );
-
-                if let Ok(tx) = l1_handler_tx_from_event(e, chain_id) {
-                    l1_handler_txs.push(tx)
+        
+        // Process each block individually to ensure none are missed
+        for block_num in from_block..=to_block {
+            match self.fetch_events(BlockId::Number(block_num), BlockId::Number(block_num)).await {
+                Ok(events) => {
+                    events.iter().for_each(|e| {
+                        if let Ok(tx) = l1_handler_tx_from_event(e, chain_id) {
+                            l1_handler_txs.push(tx)
+                        }
+                    });
                 }
-            });
-
+                Err(e) => {
+                    warn!(target: LOG_TARGET, "Error fetching block {}: {}", block_num, e);
+                    // Return the last successfully processed block
+                    return Ok((block_num - 1, l1_handler_txs));
+                }
+            }
+        }
+    
         Ok((to_block, l1_handler_txs))
     }
 
